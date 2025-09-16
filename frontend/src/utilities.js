@@ -1,3 +1,5 @@
+import { any } from "@tensorflow/tfjs";
+
 export const TRIANGULATION = [
     127,
     34,
@@ -2678,5 +2680,142 @@ export const TRIANGULATION = [
                 ctx.fill();
             }
         });
+    }
+  };
+
+  const NOSE_TIP = 1;
+  const NOSE_BRIDGE = 6;
+  const LEFT_EYE_CORNER = 33;
+  const RIGHT_EYE_CORNER = 263;
+  const LEFT_MOUTH_CORNER = 61;
+  const RIGHT_MOUTH_CORNER = 291;
+
+  export const calculateHeadPose = (landmarks) => {
+    const noseTip = landmarks[NOSE_TIP];
+    const noseBridge = landmarks[NOSE_BRIDGE];
+    const leftEye = landmarks[LEFT_EYE_CORNER];
+    const rightEye = landmarks[RIGHT_EYE_CORNER];
+    const leftMouth = landmarks[LEFT_MOUTH_CORNER];
+    const rightMouth = landmarks[RIGHT_MOUTH_CORNER];
+
+    const yaw = calculateYaw(leftEye, rightEye, noseTip);
+    const pitch = calculatePitch(noseTip, noseBridge, leftMouth, rightMouth);
+    const roll = calculateRoll(leftEye, rightEye);
+
+    return { yaw, pitch, roll };
+  };
+
+  const calculateYaw = (leftEye, rightEye, noseTip) => {
+    const eyeCenter = [
+        (leftEye[0] + rightEye[0]) / 2,
+        (leftEye[1] + rightEye[1]) / 2
+    ];
+
+    const deltaX = noseTip[0] - eyeCenter[0];
+    const eyeDistance = Math.abs(rightEye[0] - leftEye[0]);
+
+    let yaw = Math.atan2(deltaX, eyeDistance) * (180 / Math.PI);
+    return Math.round(yaw * 100) / 100;
+  };
+
+  const calculatePitch = (noseTip, noseBridge, leftMouth, rightMouth) => {
+    const mouthCenter = [
+        (leftMouth[0] + rightMouth[0]) / 2,
+        (leftMouth[1] + rightMouth[1]) / 2
+    ];
+
+    const noseToMouthY = mouthCenter[1] - noseTip[1];
+    const noseBridgeToTipY = noseTip[1] - noseBridge[1];
+
+    if (noseBridgeToTipY === 0) return 0;
+
+    let pitch = Math.atan2(noseToMouthY, Math.abs(noseBridgeToTipY)) * (180 / Math.PI) - 90;
+    return Math.round(pitch * 100) / 100;
+  };
+
+  const calculateRoll = (leftEye, rightEye) => {
+    const deltaY = rightEye[1] - leftEye[1];
+    const deltaX = rightEye[0] - leftEye[0];
+
+    let roll = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
+    return Math.round(roll * 100) / 100;
+  };
+
+  export const calculateRelativePose = (calibrationPose, currentPose) => {
+    const relativePose = {
+        yaw: currentPose.yaw - calibrationPose.yaw,
+        pitch: currentPose.pitch - calibrationPose.pitch,
+        roll: currentPose.roll - calibrationPose.roll
+    };
+
+    console.log("Current angles:", currentPose);
+    console.log("Relative angles:", relativePose);
+
+    const matrices = generateRotationMatrices(relativePose);
+    
+    return { angles: relativePose, matrices };
+  };
+
+  const generateRotationMatrices = (angles) => {
+    const { yaw, pitch, roll } = angles;
+    const matrices = {};
+
+    if (Math.abs(yaw) > 0.1) {
+        const yawRad = yaw * (Math.PI / 180);
+        matrices.Ry = [
+            [Math.cos(yawRad), 0, Math.sin(yawRad)],
+            [0, 1, 0],
+            [-Math.sin(yawRad), 0, Math.cos(yawRad)]
+        ];
+        console.log(`Yaw matrix (${yaw.toFixed(2)}):`, matrices.Ry);
+    }
+
+    if (Math.abs(pitch) > 0.1) {
+        const pitchRad = pitch * (Math.PI / 180);
+        matrices.Rx = [
+            [1, 0, 0],
+            [0, Math.cos(pitchRad), -Math.sin(pitchRad)],
+            [0, Math.sin(pitchRad), Math.cos(pitchRad)]
+        ];
+        console.log(`Pitch matrix (${pitch.toFixed(2)}):`, matrices.Rx);
+    }
+
+    if (Math.abs(roll) > 0.1) {
+        const rollRad = roll * (Math.PI / 180);
+        matrices.Rz = [
+            [Math.cos(rollRad), -Math.sin(rollRad), 0],
+            [Math.sin(rollRad), Math.cos(rollRad), 0],
+            [0, 0, 1]
+        ];
+
+        console.log(`Roll matrix (${roll.toFixed(2)}):`, matrices.Rz);
+    }
+
+    return matrices;
+  };
+
+  export const displayPoseInfo = (ctx, poseData) => {
+    const { angles } = poseData;
+
+    if (
+        !displayPoseInfo.prevAngles ||
+        Math.abs(angles.yaw - displayPoseInfo.prevAngles.yaw) > 0.5 ||
+        Math.abs(angles.pitch - displayPoseInfo.prevAngles.pitch) > 0.5 ||
+        Math.abs(angles.roll - displayPoseInfo.prevAngles.roll) > 0.5
+    ) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+        ctx.fillRect(10, 10, 300, 100);
+
+        ctx.fillStyle = "white";
+        ctx.font = "16px Arial";
+        ctx.fillText(`Yaw: ${angles.yaw.toFixed(2)}`, 20, 30);
+        ctx.fillText(`Pitch: ${angles.pitch.toFixed(2)}`, 20, 50);
+        ctx.fillText(`Roll: ${angles.roll.toFixed(2)}`, 20, 70);
+
+        const hasMovement = Object.keys(poseData.matrices).length > 0;
+        ctx.fillStyle = hasMovement ? "#ff6b6b" : "#4ecdc4";
+        ctx.fillText(`Status: ${hasMovement ? 'Head moved' : 'Head straight'}`, 20, 90);
+
+        displayPoseInfo.prevAngles = { ...angles };
     }
   };
