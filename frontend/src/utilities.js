@@ -2791,8 +2791,57 @@ export const TRIANGULATION = [
         console.log(`Roll matrix (${roll.toFixed(2)}):`, matrices.Rz);
     }
 
+    if (Object.keys(matrices).length > 0) {
+      const combinedMatrix = calculateCombinedRotationMatrix(matrices);
+      console.log("Combined Rotation Matrix R:", combinedMatrix);
+      matrices.R = combinedMatrix;
+    }
+
     return matrices;
   };
+
+  const multiplyMatrices = (a, b) => {
+    const result = [
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0]
+    ];
+
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        for (let k = 0; k < 3; k++) {
+          result[i][j] += a[i][k] * b[k][j];
+        }
+      }
+    }
+
+    return result;
+  };
+
+  const calculateCombinedRotationMatrix = (matrices) => {
+    let R = [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1]
+    ];
+
+    if (matrices.Rx) {
+      R = multiplyMatrices(R, matrices.Rx);
+      console.log("After applying Rx:", R);
+    }
+
+    if (matrices.Ry) {
+      R = multiplyMatrices(R, matrices.Ry);
+      console.log("After applying Ry:", R);
+    }
+
+    if (matrices.Rz) {
+      R = multiplyMatrices(R, matrices.Rz);
+      console.log("After applying Rz:", R);
+    }
+
+    return R;
+  }
 
   export const displayPoseInfo = (ctx, poseData) => {
     const { angles } = poseData;
@@ -2804,7 +2853,7 @@ export const TRIANGULATION = [
         Math.abs(angles.roll - displayPoseInfo.prevAngles.roll) > 0.5
     ) {
         ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
-        ctx.fillRect(10, 10, 300, 100);
+        ctx.fillRect(10, 10, 300, 120);
 
         ctx.fillStyle = "white";
         ctx.font = "16px Arial";
@@ -2813,8 +2862,11 @@ export const TRIANGULATION = [
         ctx.fillText(`Roll: ${angles.roll.toFixed(2)}`, 20, 70);
 
         const hasMovement = Object.keys(poseData.matrices).length > 0;
-        ctx.fillStyle = hasMovement ? "#ff6b6b" : "#4ecdc4";
+        const hasCombinedMatrix = poseData.matrices.R !== undefined;        ctx.fillStyle = hasMovement ? "#ff6b6b" : "#4ecdc4";
         ctx.fillText(`Status: ${hasMovement ? 'Head moved' : 'Head straight'}`, 20, 90);
+        if (hasCombinedMatrix) {
+          ctx.fillText(`Combined Matrix: Available`, 20, 110);
+        }
 
         displayPoseInfo.prevAngles = { ...angles };
     }
