@@ -2657,6 +2657,199 @@ export const TRIANGULATION = [
     ctx.stroke(region);
   };
 
+  const v2 = (p) => [p[0], p[1]];
+  const add2 = (a, b) => [a[0] + b[0], a[1] + b[1]];
+  const sub2 = (a, b) => [a[0] - b[0], a[1] - b[1]];
+  const mul2 = (a, s) => [a[0] * s, a[1] * s];
+  const dot2 = (a, b) => a[0] * b[0] + a[1] * b[1];
+  const len2 = (a) => Math.hypot(a[0], a[1])
+  const norm2 = (a) => {
+    const L = len2(a);
+    return L > 1e-8 ? [a[0]/L, a[1]/L]:[0, 0];
+  };
+  const mid2 = (a, b) => mul2(add2(a, b), 0.5);
+
+  export const getEyeKeyPoints = (lm) => {
+    const L = {
+      inner: v2(lm[L_INNER]),
+      outer: v2(lm[L_OUTER]),
+      up: v2(lm[L_UPMID]),
+      down: v2(lm[L_LOMID]),
+    };
+    const R = {
+      inner: v2(lm[R_INNER]),
+      outer: v2(lm[R_OUTER]),
+      up: v2(lm[R_UPMID]),
+      down: v2(lm[R_LOMID]),
+    };
+    return { L, R };
+  };
+
+  export const buildEyeLocalFrame = (eye) => {
+    const p_in = eye.inner;
+    const p_out = eye.outer; 
+    const p_up = eye.up; 
+    const p_dn = eye.down;
+
+    // u^: horizontal axis (inner -> outer)
+    const u_hat = norm2(sub2(p_out, p_in));
+
+    // v_raw: from lower eyelid -> upper eyelid
+    const v_raw = norm2(sub2(p_up, p_dn));
+
+    // v^ orthogonal to u^ (Gram-Schmidt 2D)
+    const proj = mul2(u_hat, dot2(v_raw, u_hat)); 
+    const v_hat = norm2(sub2(v_raw, proj));
+
+    // Center c
+    const c = mid2(p_in, p_out);
+
+    const eyeWidth = len2(sub2(p_out, p_in)); 
+    const eyeHeight = len2(sub2(p_up, p_dn));
+
+    return { u_hat, v_hat, c, eyeWidth, eyeHeight, p_in, p_out, p_up, p_dn };
+  };
+
+  export const getEyeLocalFrames = (landmarks) => {
+    const { L, R } = getEyeKeyPoints(landmarks);
+    return { 
+      left: buildEyeLocalFrame(L), 
+      right: buildEyeLocalFrame(R), 
+    };
+  };
+
+  export const drawEyeFrame = (ctx, frame, color="yellow", scale=40) => {
+    const { u_hat, v_hat, c } = frame; 
+    const endU = add2(c, mul2(u_hat, scale)); 
+    const endV = add2(c, mul2(v_hat, scale));
+
+    // u^ axis 
+    ctx.beginPath(); 
+    ctx.moveTo(c[0], c[1]); 
+    ctx.lineTo(endU[0], endU[1]); 
+    ctx.strokeStyle = color; 
+    ctx.lineWidth = 2; 
+    ctx.stroke();
+
+    // v^ axis
+    ctx.beginPath(); 
+    ctx.moveTo(c[0], c[1]); 
+    ctx.lineTo(endV[0], endV[1]); 
+    ctx.strokeStyle = "#00ffff"; 
+    ctx.lineWidth = 2; 
+    ctx.stroke();
+
+    // Center c
+    ctx.beginPath(); 
+    ctx.arc(c[0], c[1], 2.5, 0, Math.PI*2); 
+    ctx.fillStyle = color; 
+    ctx.fill();
+  };
+
+  export const CANON_W = 120; 
+  export const CANON_H = 60;
+
+  const canonTri = [ 
+    [15, CANON_H * 0.5], 
+    [CANON_W - 15, CANON_H * 0.5], 
+    [CANON_W * 0.5, CANON_H * 0.3], 
+  ];
+
+  export const CANON_M = 15;
+  const canonQuad = [ 
+    [CANON_M, CANON_H * 0.5], 
+    [CANON_W - CANON_M, CANON_H * 0.5], 
+    [CANON_W * 0.5, CANON_H * 0.30], 
+    [CANON_W * 0.5, CANON_H * 0.70],
+  ];
+
+  export const rectifyEyePatch = (frameCanvasEl, eyeFrame, outCanvasEl) => {
+    if (typeof window === "undefined" || !window.cv || !window.cv.getAffineTransform) return false;
+    const cv = window.cv; 
+    
+    const src = cv.imread(frameCanvasEl); 
+    
+    const p_in = eyeFrame?.p_in || null; 
+    const p_out = eyeFrame?.p_out || null; 
+    const p_up = eyeFrame?.p_up || null;
+
+    if (!p_in || !p_out || !p_up) { 
+      console.warn("eyeFrame is missing p_in/p_out/p_up; ensure buildEyeLocalFrame stores them."); 
+      src.delete(); 
+      return false; 
+    }
+
+    const srcTri = cv.matFromArray(3, 2, cv.CV_32F, [ 
+      p_in[0], p_in[1], 
+      p_out[0], p_out[1], 
+      p_up[0], p_up[1], 
+    ]);
+    const dstTri = cv.matFromArray(3, 2, cv.CV_32F, [ 
+      canonTri[0][0], canonTri[0][1], 
+      canonTri[1][0], canonTri[1][1], 
+      canonTri[2][0], canonTri[2][1], 
+    ]);
+
+    const M = cv.getAffineTransform(srcTri, dstTri); 
+    const dsize = new cv.Size(CANON_W, CANON_H); 
+    const dst = new cv.Mat();
+    cv.warpAffine( 
+      src, dst, M, dsize, 
+      cv.INTER_LINEAR, cv.BORDER_CONSTANT, 
+      new cv.Scalar(0, 0, 0, 255) 
+    );
+
+    outCanvasEl.width = CANON_W; 
+    outCanvasEl.height = CANON_H; 
+    cv.imshow(outCanvasEl, dst);
+
+    src.delete(); dst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
+    return true;
+  };
+
+  export const rectifyEyePatchH = (frameCanvasEl, eyeFrame, outCanvasEl) => {
+    if (typeof window === "undefined" || !window.cv || !window.cv.getPerspectiveTransform) return false;
+    const cv = window.cv; 
+    
+    const src = cv.imread(frameCanvasEl); 
+    const { p_in, p_out, p_up, p_dn } = eyeFrame || {};
+    if (!p_in || !p_out || !p_up || !p_dn) { 
+      console.warn("Missing p_in/p_out/p_up/p_dn in eyeFrame."); 
+      src.delete(); 
+      return false; 
+    }
+
+    const srcPts = cv.matFromArray(4, 2, cv.CV_32F, [ 
+      p_in[0], p_in[1], 
+      p_out[0], p_out[1], 
+      p_up[0], p_up[1], 
+      p_dn[0], p_dn[1], 
+    ]);
+
+    const dstPts = cv.matFromArray(4, 2, cv.CV_32F, [ 
+      canonQuad[0][0], canonQuad[0][1], 
+      canonQuad[1][0], canonQuad[1][1], 
+      canonQuad[2][0], canonQuad[2][1], 
+      canonQuad[3][0], canonQuad[3][1], 
+    ]);
+
+    const H = cv.getPerspectiveTransform(srcPts, dstPts); 
+    const dsize = new cv.Size(CANON_W, CANON_H); 
+    const dst = new cv.Mat();
+    cv.warpPerspective( 
+      src, dst, H, dsize, 
+      cv.INTER_LINEAR, cv.BORDER_CONSTANT, 
+      new cv.Scalar(0, 0, 0, 255) 
+    );
+
+    outCanvasEl.width = CANON_W; 
+    outCanvasEl.height = CANON_H; 
+    cv.imshow(outCanvasEl, dst);
+
+    src.delete(); dst.delete(); H.delete(); srcPts.delete(); dstPts.delete();
+    return true;
+  };
+
   export const drawMesh = (predictions, ctx) => {
     if (predictions.length > 0) {
         predictions.forEach((prediction) => {
@@ -2689,6 +2882,16 @@ export const TRIANGULATION = [
   const RIGHT_EYE_CORNER = 263;
   const LEFT_MOUTH_CORNER = 61;
   const RIGHT_MOUTH_CORNER = 291;
+
+  export const L_OUTER = 33; // left eye outer canthus
+  export const L_INNER = 133; // left eye inner canthus
+  export const L_UPMID = 159; // left eye upper mid-lid
+  export const L_LOMID = 145; // left eye lower mid-lid
+
+  export const R_OUTER = 263; // right eye outer canthus
+  export const R_INNER = 362; // right eye inner canthus
+  export const R_UPMID = 386; // right eye upper mid-lid
+  export const R_LOMID = 374; // right eye lower mid-lid
 
   export const calculateHeadPose = (landmarks) => {
     const noseTip = landmarks[NOSE_TIP];
