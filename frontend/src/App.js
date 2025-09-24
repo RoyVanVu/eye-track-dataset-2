@@ -3,11 +3,17 @@ import * as tf from "@tensorflow/tfjs";
 import * as facemesh from "@tensorflow-models/facemesh";
 import Webcam from "react-webcam";
 import './App.css';
-import { drawMesh, calculateHeadPose, calculateRelativePose, displayPoseInfo } from './utilities';
+import { drawMesh, calculateHeadPose, calculateRelativePose, displayPoseInfo,
+         getEyeLocalFrames, drawEyeFrame, rectifyEyePatch, 
+         CANON_H, CANON_W, rectifyEyePatchH
+ } from './utilities';
 
 function App() {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
+  const frameCanvasRef = useRef(null); 
+  const leftPatchRef = useRef(null); 
+  const rightPatchRef = useRef(null);
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -65,13 +71,31 @@ function App() {
       canvasRef.current.height = videoHeight;
 
       const face = await net.estimateFaces(video);
-      // console.log(face);
 
       const ctx = canvasRef.current.getContext("2d");
       drawMesh(face, ctx);
 
       if (isCalibrated && face.length > 0) {
         const landmarks = face[0].scaledMesh;
+        const grabber = frameCanvasRef.current;
+        const gctx = grabber.getContext("2d"); 
+        grabber.width = videoWidth; 
+        grabber.height = videoHeight; 
+        gctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+
+        const { left: leftEyeFrame, right: rightEyeFrame } = getEyeLocalFrames(landmarks);
+
+        drawEyeFrame(ctx, leftEyeFrame, "yellow", 40); 
+        drawEyeFrame(ctx, rightEyeFrame, "lime", 40);
+
+        if (window.cv && window.cv.getPerspectiveTransform) { 
+          rectifyEyePatchH(grabber, leftEyeFrame, leftPatchRef.current); 
+          rectifyEyePatchH(grabber, rightEyeFrame, rightPatchRef.current); 
+        } else if (window.cv && window.cv.getAffineTransform) { 
+          rectifyEyePatch(grabber, leftEyeFrame, leftPatchRef.current); 
+          rectifyEyePatch(grabber, rightEyeFrame, rightPatchRef.current); 
+        }
+
         const currentPose = calculateHeadPose(landmarks);
         const relativePose = calculateRelativePose(calibrationPose, currentPose);
 
@@ -113,6 +137,38 @@ function App() {
             width:640,
             height:480
           }}
+        />
+
+        <canvas 
+          ref={frameCanvasRef} 
+          style={{ 
+            display: "none" 
+          }} 
+        />
+
+        <canvas 
+          ref={leftPatchRef} 
+          style={{ 
+            position:"absolute", 
+            left:20, 
+            bottom:20, 
+            zIndex:10, 
+            width:120, 
+            height:60, 
+            border:"1px solid #ff0" 
+          }} 
+        />
+        <canvas 
+          ref={rightPatchRef} 
+          style={{ 
+            position:"absolute", 
+            left:160, 
+            bottom:20, 
+            zIndex:10, 
+            width:120, 
+            height:60, 
+            border:"1px solid #0f0" 
+          }} 
         />
 
         <button
