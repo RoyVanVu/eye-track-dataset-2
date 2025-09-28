@@ -5,7 +5,8 @@ import Webcam from "react-webcam";
 import './App.css';
 import { drawMesh, calculateHeadPose, calculateRelativePose, displayPoseInfo,
          getEyeLocalFrames, drawEyeFrame, rectifyEyePatch, 
-         CANON_H, CANON_W, rectifyEyePatchH
+         CANON_H, CANON_W, rectifyEyePatchH, drawDot, 
+         findCODLocalMean
  } from './utilities';
 
 function App() {
@@ -95,6 +96,20 @@ function App() {
           rectifyEyePatch(grabber, leftEyeFrame, leftPatchRef.current); 
           rectifyEyePatch(grabber, rightEyeFrame, rightPatchRef.current); 
         }
+
+        const opts = {
+          k: Math.round(0.24 * CANON_H),
+          bandY: [0.32, 0.68],
+          xMarginNorm: 0.10,
+          centerPrior: 0.03,
+          edgePenalty: 0.08  
+        };
+
+        const codL = findCODLocalMean(leftPatchRef.current, opts);
+        if (codL) drawDot(leftPatchRef.current, codL, '#fff');
+
+        const codR = findCODLocalMean(rightPatchRef.current, opts);
+        if (codR) drawDot(rightPatchRef.current, codR, '#fff');
 
         const currentPose = calculateHeadPose(landmarks);
         const relativePose = calculateRelativePose(calibrationPose, currentPose);

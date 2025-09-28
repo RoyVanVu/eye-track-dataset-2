@@ -1,4 +1,4 @@
-import { any } from "@tensorflow/tfjs";
+import { any, cos, mean, mul } from "@tensorflow/tfjs";
 
 export const TRIANGULATION = [
     127,
@@ -3074,3 +3074,106 @@ export const TRIANGULATION = [
         displayPoseInfo.prevAngles = { ...angles };
     }
   };
+
+  const _odd = (k, min=3) => {
+    k = Math.max(min, Math.round(k));
+    return (k % 2 === 0) ? (k + 1) : k;
+  };
+
+  const _grayscale = (imgData, w, h) => {
+    const G = new Float32Array(w * h);
+    const d = imgData.data;
+    for (let i = 0, j = 0; j < G.length; i += 4, j++) {
+      const r = d[i], g = d[i + 1], b = d[i + 2];
+      G[j] = 0.299 * r + 0.587 * g + 0.114 * b;
+    }
+    return G;
+  };
+
+  const _integral = (G, w, h) => {
+    const W = w + 1;
+    const II = new Float64Array(W * (h + 1));
+    for (let y = 1; y <= h; y++) {
+      let rowSum = 0;
+      let base = (y - 1) * w;
+      for (let x = 1; x <= w; x++) {
+        rowSum += G[base + (x - 1)];
+        const idx = y * W + x;
+        II[idx] = II[idx - W] + rowSum;
+      }
+    }
+    return II;
+  };
+
+  const _rectSum = (II, w, x0, y0, x1, y1) => {
+    const W = w + 1;
+    const A = II[y0 * W + x0];
+    const B = II[y0 * W + (x1 + 1)];
+    const C = II[(y1 + 1) * W + x0];
+    const D = II[(y1 + 1) * W + (x1 + 1)];
+    return D - B - C + A;
+  };
+
+/**
+ * Find COD (center-of-darkness) by local-mean min on patch canvas that already rectify 
+ * @param {HTMLCanvasElement} patchCanvas 
+ * @param {Object} opts
+ *  - k: kernel size (odd). Default = 0.35 * CANON_H
+ *  - bandY: [t, b] (0..1) consider only vertical strips (to avoid eyelids). Default [0.25, 0.75]
+ *  - centerPrior: center priority factor (0..~0.1). Default 0.03
+ * @return {{x:number, y:number, mean:number}|null}
+ */
+export const findCODLocalMean = (patchCanvas, opts = {}) => {
+  if (!patchCanvas) return null;
+  const w = patchCanvas.width || CANON_W;
+  const h = patchCanvas.height || CANON_H;
+  if (w === 0 || h === 0) return null;
+
+  const k = _odd(opts.k ?? Math.round(0.35 * h));
+  const r = (k - 1) >> 1;
+
+  const [tNorm, bNorm] = opts.bandY ?? [0.25, 0.75];
+  const yTopBand = Math.max(r, Math.floor(h * tNorm));
+  const yBotBand = Math.min(h - 1 - r, Math.ceil(h * bNorm) - 1);
+  if (yBotBand < yTopBand) return null;
+
+  const centerPrior = opts.centerPrior ?? 0.03;
+  const cx = 0.5 * w, cy = 0.5 * h;
+
+  const ctx = patchCanvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, w, h);
+  const G = _grayscale(img, w, h);
+  const II = _integral(G, w, h);
+
+  let best = { x: -1, y: -1, mean: Infinity };
+  for (let y = yTopBand; y <= yBotBand; y++) {
+    for (let x = r; x <= w - 1 - r; x++) {
+      const sum = _rectSum(II, w, x - r, y - r, x + r, y + r);
+      const mean = sum / (k * k);
+
+      const dx = (x - cx) / w, dy = (y - cy) / h;
+      const cost = mean + centerPrior * (dx * dx + dy * dy) * 255;
+      
+      if (cost < best.mean) {
+        best.x = x;
+        best.y = y; 
+        best.mean = cost;
+      }
+    }
+  }
+  if (best.x < 0) return null;
+  return { x: best.x, y: best.y, mean: best.mean };
+};
+
+export const drawDot = (patchCanvas, pt, color = '#fff') => {
+  if (!patchCanvas || !pt) return;
+  const ctx = patchCanvas.getContext('2d');
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'black';
+  ctx.stroke();
+};
+
