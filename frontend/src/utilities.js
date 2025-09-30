@@ -1,4 +1,4 @@
-import { any, cos, mean, mul } from "@tensorflow/tfjs";
+import { any, cos, mean, mul, relu } from "@tensorflow/tfjs";
 
 export const TRIANGULATION = [
     127,
@@ -2643,6 +2643,12 @@ export const TRIANGULATION = [
     255,
   ];
 
+  export const IRIS_LEFT_CENTER = 468;
+  export const IRIS_RIGHT_CENTER = 473;
+
+  export const IRIS_LEFT_POINTS = [468, 469, 470, 471, 472];
+  export const IRIS_RIGHT_POINTS = [473, 474, 475, 476, 477];
+
   const drawPath = (ctx, points, closePath) => {
     const region = new Path2D();
     region.moveTo(points[0][0], points[0][1]);
@@ -2718,6 +2724,60 @@ export const TRIANGULATION = [
     };
   };
 
+  /**
+   * Get iris centers from MediaPipe landmarks
+   * @param {Array} landmarks - Full landmark array (should have 478 points with iris data)
+   * @return {{left: Array, right: Array}|null} - Iris center coordinates or null
+   */
+  export const getIrisCenters = (landmarks) => {
+    if (!landmarks || landmarks.length < 478) {
+      console.warn("Iris landmarks not available. Need 478 landmarks but got:", landmarks?.length);
+      return null;
+    }
+
+    return {
+      left: v2(landmarks[IRIS_LEFT_CENTER]),
+      right: v2(landmarks[IRIS_RIGHT_CENTER])
+    };
+  };
+
+  export const irisToLocal = (eyeFrame, irisC) => {
+    if (!eyeFrame || !irisC) return null;
+    const { c, u_hat, v_hat, eyeWidth, eyeHeight } = eyeFrame;
+    const rel = sub2(irisC, c);
+
+    const x = dot2(rel, u_hat) / (0.5 * eyeWidth);
+    const y = dot2(rel, v_hat) / (0.5 * eyeHeight);
+
+    return { x, y };
+  };
+
+  export const getNormalizedIris = (landmarks) => {
+    const frames = getEyeLocalFrames(landmarks);
+    const centers = getIrisCenters(landmarks);
+    if (!frames || !centers) return null;
+
+    return {
+      left: irisToLocal(frames.left, centers.left),
+      right: irisToLocal(frames.right, centers.right),
+    };
+  };
+
+  export const makeEMA2 = (alpha = 0.6) => {
+    let s = null;
+    return (v) => {
+      if (!v) return s;
+      if (!s) { 
+        s = { x: v.x, y: v.y };
+      }
+      else {
+        s.x = alpha * v.x + (1 - alpha) * s.x;
+        s.y = alpha * v.y + (1 - alpha) * s.y;
+      }
+      return { ...s };
+    };
+  };
+
   export const drawEyeFrame = (ctx, frame, color="yellow", scale=40) => {
     const { u_hat, v_hat, c } = frame; 
     const endU = add2(c, mul2(u_hat, scale)); 
@@ -2746,133 +2806,29 @@ export const TRIANGULATION = [
     ctx.fill();
   };
 
-  export const CANON_W = 120; 
-  export const CANON_H = 60;
-
-  const canonTri = [ 
-    [15, CANON_H * 0.5], 
-    [CANON_W - 15, CANON_H * 0.5], 
-    [CANON_W * 0.5, CANON_H * 0.3], 
-  ];
-
-  export const CANON_M = 15;
-  const canonQuad = [ 
-    [CANON_M, CANON_H * 0.5], 
-    [CANON_W - CANON_M, CANON_H * 0.5], 
-    [CANON_W * 0.5, CANON_H * 0.30], 
-    [CANON_W * 0.5, CANON_H * 0.70],
-  ];
-
-  export const rectifyEyePatch = (frameCanvasEl, eyeFrame, outCanvasEl) => {
-    if (typeof window === "undefined" || !window.cv || !window.cv.getAffineTransform) return false;
-    const cv = window.cv; 
-    
-    const src = cv.imread(frameCanvasEl); 
-    
-    const p_in = eyeFrame?.p_in || null; 
-    const p_out = eyeFrame?.p_out || null; 
-    const p_up = eyeFrame?.p_up || null;
-
-    if (!p_in || !p_out || !p_up) { 
-      console.warn("eyeFrame is missing p_in/p_out/p_up; ensure buildEyeLocalFrame stores them."); 
-      src.delete(); 
-      return false; 
-    }
-
-    const srcTri = cv.matFromArray(3, 2, cv.CV_32F, [ 
-      p_in[0], p_in[1], 
-      p_out[0], p_out[1], 
-      p_up[0], p_up[1], 
-    ]);
-    const dstTri = cv.matFromArray(3, 2, cv.CV_32F, [ 
-      canonTri[0][0], canonTri[0][1], 
-      canonTri[1][0], canonTri[1][1], 
-      canonTri[2][0], canonTri[2][1], 
-    ]);
-
-    const M = cv.getAffineTransform(srcTri, dstTri); 
-    const dsize = new cv.Size(CANON_W, CANON_H); 
-    const dst = new cv.Mat();
-    cv.warpAffine( 
-      src, dst, M, dsize, 
-      cv.INTER_LINEAR, cv.BORDER_CONSTANT, 
-      new cv.Scalar(0, 0, 0, 255) 
-    );
-
-    outCanvasEl.width = CANON_W; 
-    outCanvasEl.height = CANON_H; 
-    cv.imshow(outCanvasEl, dst);
-
-    src.delete(); dst.delete(); M.delete(); srcTri.delete(); dstTri.delete();
-    return true;
-  };
-
-  export const rectifyEyePatchH = (frameCanvasEl, eyeFrame, outCanvasEl) => {
-    if (typeof window === "undefined" || !window.cv || !window.cv.getPerspectiveTransform) return false;
-    const cv = window.cv; 
-    
-    const src = cv.imread(frameCanvasEl); 
-    const { p_in, p_out, p_up, p_dn } = eyeFrame || {};
-    if (!p_in || !p_out || !p_up || !p_dn) { 
-      console.warn("Missing p_in/p_out/p_up/p_dn in eyeFrame."); 
-      src.delete(); 
-      return false; 
-    }
-
-    const srcPts = cv.matFromArray(4, 2, cv.CV_32F, [ 
-      p_in[0], p_in[1], 
-      p_out[0], p_out[1], 
-      p_up[0], p_up[1], 
-      p_dn[0], p_dn[1], 
-    ]);
-
-    const dstPts = cv.matFromArray(4, 2, cv.CV_32F, [ 
-      canonQuad[0][0], canonQuad[0][1], 
-      canonQuad[1][0], canonQuad[1][1], 
-      canonQuad[2][0], canonQuad[2][1], 
-      canonQuad[3][0], canonQuad[3][1], 
-    ]);
-
-    const H = cv.getPerspectiveTransform(srcPts, dstPts); 
-    const dsize = new cv.Size(CANON_W, CANON_H); 
-    const dst = new cv.Mat();
-    cv.warpPerspective( 
-      src, dst, H, dsize, 
-      cv.INTER_LINEAR, cv.BORDER_CONSTANT, 
-      new cv.Scalar(0, 0, 0, 255) 
-    );
-
-    outCanvasEl.width = CANON_W; 
-    outCanvasEl.height = CANON_H; 
-    cv.imshow(outCanvasEl, dst);
-
-    src.delete(); dst.delete(); H.delete(); srcPts.delete(); dstPts.delete();
-    return true;
-  };
-
   export const drawMesh = (predictions, ctx) => {
     if (predictions.length > 0) {
-        predictions.forEach((prediction) => {
-            const keypoints = prediction.scaledMesh;
+      predictions.forEach((prediction) => {
+        const keypoints = prediction.scaledMesh;
 
-            for (let i = 0; i < TRIANGULATION.length / 3; i++) {
-                const points = [
-                    TRIANGULATION[i * 3],
-                    TRIANGULATION[i * 3 + 1],
-                    TRIANGULATION[i * 3 + 2],
-                ].map((index) => keypoints[index]);
-                drawPath(ctx, points, true);
-            }
+        for (let i = 0; i < TRIANGULATION.length / 3; i++) {
+          const points = [
+            TRIANGULATION[i * 3],
+            TRIANGULATION[i * 3 + 1],
+            TRIANGULATION[i * 3 + 2],
+          ].map((index) => keypoints[index]);
+          drawPath(ctx, points, true);
+        }
 
-            for (let i = 0; i < keypoints.length; i++) {
-                const x = keypoints[i][0];
-                const y = keypoints[i][1];
-                ctx.beginPath();
-                ctx.arc(x, y, 1, 0, 3 * Math.PI);
-                ctx.fillStyle = "aqua";
-                ctx.fill();
-            }
-        });
+        for (let i = 0; i < keypoints.length; i++) {
+          const x = keypoints[i][0];
+          const y = keypoints[i][1];
+          ctx.beginPath();
+          ctx.arc(x, y, 1, 0, 3 * Math.PI);
+          ctx.fillStyle = "aqua";
+          ctx.fill();
+        }
+      });
     }
   };
 
@@ -3074,106 +3030,3 @@ export const TRIANGULATION = [
         displayPoseInfo.prevAngles = { ...angles };
     }
   };
-
-  const _odd = (k, min=3) => {
-    k = Math.max(min, Math.round(k));
-    return (k % 2 === 0) ? (k + 1) : k;
-  };
-
-  const _grayscale = (imgData, w, h) => {
-    const G = new Float32Array(w * h);
-    const d = imgData.data;
-    for (let i = 0, j = 0; j < G.length; i += 4, j++) {
-      const r = d[i], g = d[i + 1], b = d[i + 2];
-      G[j] = 0.299 * r + 0.587 * g + 0.114 * b;
-    }
-    return G;
-  };
-
-  const _integral = (G, w, h) => {
-    const W = w + 1;
-    const II = new Float64Array(W * (h + 1));
-    for (let y = 1; y <= h; y++) {
-      let rowSum = 0;
-      let base = (y - 1) * w;
-      for (let x = 1; x <= w; x++) {
-        rowSum += G[base + (x - 1)];
-        const idx = y * W + x;
-        II[idx] = II[idx - W] + rowSum;
-      }
-    }
-    return II;
-  };
-
-  const _rectSum = (II, w, x0, y0, x1, y1) => {
-    const W = w + 1;
-    const A = II[y0 * W + x0];
-    const B = II[y0 * W + (x1 + 1)];
-    const C = II[(y1 + 1) * W + x0];
-    const D = II[(y1 + 1) * W + (x1 + 1)];
-    return D - B - C + A;
-  };
-
-/**
- * Find COD (center-of-darkness) by local-mean min on patch canvas that already rectify 
- * @param {HTMLCanvasElement} patchCanvas 
- * @param {Object} opts
- *  - k: kernel size (odd). Default = 0.35 * CANON_H
- *  - bandY: [t, b] (0..1) consider only vertical strips (to avoid eyelids). Default [0.25, 0.75]
- *  - centerPrior: center priority factor (0..~0.1). Default 0.03
- * @return {{x:number, y:number, mean:number}|null}
- */
-export const findCODLocalMean = (patchCanvas, opts = {}) => {
-  if (!patchCanvas) return null;
-  const w = patchCanvas.width || CANON_W;
-  const h = patchCanvas.height || CANON_H;
-  if (w === 0 || h === 0) return null;
-
-  const k = _odd(opts.k ?? Math.round(0.35 * h));
-  const r = (k - 1) >> 1;
-
-  const [tNorm, bNorm] = opts.bandY ?? [0.25, 0.75];
-  const yTopBand = Math.max(r, Math.floor(h * tNorm));
-  const yBotBand = Math.min(h - 1 - r, Math.ceil(h * bNorm) - 1);
-  if (yBotBand < yTopBand) return null;
-
-  const centerPrior = opts.centerPrior ?? 0.03;
-  const cx = 0.5 * w, cy = 0.5 * h;
-
-  const ctx = patchCanvas.getContext('2d');
-  const img = ctx.getImageData(0, 0, w, h);
-  const G = _grayscale(img, w, h);
-  const II = _integral(G, w, h);
-
-  let best = { x: -1, y: -1, mean: Infinity };
-  for (let y = yTopBand; y <= yBotBand; y++) {
-    for (let x = r; x <= w - 1 - r; x++) {
-      const sum = _rectSum(II, w, x - r, y - r, x + r, y + r);
-      const mean = sum / (k * k);
-
-      const dx = (x - cx) / w, dy = (y - cy) / h;
-      const cost = mean + centerPrior * (dx * dx + dy * dy) * 255;
-      
-      if (cost < best.mean) {
-        best.x = x;
-        best.y = y; 
-        best.mean = cost;
-      }
-    }
-  }
-  if (best.x < 0) return null;
-  return { x: best.x, y: best.y, mean: best.mean };
-};
-
-export const drawDot = (patchCanvas, pt, color = '#fff') => {
-  if (!patchCanvas || !pt) return;
-  const ctx = patchCanvas.getContext('2d');
-  ctx.beginPath();
-  ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.fill();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = 'black';
-  ctx.stroke();
-};
-
