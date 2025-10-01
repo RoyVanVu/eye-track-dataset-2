@@ -6,7 +6,12 @@ import './App.css';
 import { drawMesh, displayPoseInfo,
          getEyeLocalFrames, drawEyeFrame, getIrisCenters, getNormalizedIris, makeEMA2,
          pickPoint3D, estimateRtHorn, eulerFromR,
-         warpEyePatch
+         warpEyePatch, fitYawPitchModel, evalYawPitch,
+         eyeAnglesToHeadVec,
+         headToCamVec,
+         combineCyclopean,
+         vecToYawPitchDeg,
+         drawArrow2D
  } from './utilities';
 
 function App() {
@@ -21,6 +26,18 @@ function App() {
   const gazeOffsetRef = useRef({ left: {x: 0, y: 0}, right: {x: 0, y: 0} });
   const headTemplateRef = useRef(null);
   const RtRef = useRef({ R_now: null, t_now: null });
+  const calibRef = useRef({
+    left: { samples: [], model: null },
+    right: { samples: [], model: null }
+  });
+  const defaultGainRef = useRef({
+    left: { kx: 20, ky: 15 },
+    right: { kx: 20, ky: 15 }
+  });
+  const gazeHeadRef = useRef({
+    left: [0, 0, 1],
+    right: [0, 0, 1]
+  });
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -77,6 +94,34 @@ function App() {
     }
   };
 
+  const addCalibSample = (eye, dx, dy, yawLabelDeg, pitchLabelDeg) => {
+    calibRef.current[eye].samples.push({
+      dx, dy, yaw: yawLabelDeg, pitch: pitchLabelDeg
+    });
+    console.log(`Add sample ${eye}:`, dx, dy, '->', yawLabelDeg, pitchLabelDeg);
+  };
+
+  const fitCalib = (eye, order=1) => {
+    const samples = calibRef.current[eye].samples;
+    if (samples.length < (order === 1 ? 2 : 6)) {
+      console.warn("Not enough samples for:", eye);
+      return;
+    }
+    const model = fitYawPitchModel(samples, order);
+    calibRef.current[eye].model = model;
+    console.log('Fitted model', eye, model);
+  };
+
+  const predictEyeAngles = (eye, dx, dy) => {
+    const side = calibRef.current[eye];
+    if (side.model) return evalYawPitch(dx, dy, side.model);
+    const g = defaultGainRef.current[eye];
+    return {
+      yaw: g.kx * dx,
+      pitch: g.ky * dy
+    };
+  };
+
   const runFacemesh = async () => {
     const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
     const detectorConfig = {
@@ -89,6 +134,44 @@ function App() {
       detect(detector)
     }, 100)
   };
+
+  useEffect(() => {
+    const keyMap = {
+      '1': { yaw: -10, pitch: -10 }, '2': { yaw: 0, pitch: -10 }, '3': { yaw: 10, pitch: -10 },
+      '4': { yaw: -10, pitch: 0 }, '5': { yaw: 0, pitch: 0 }, '6': { yaw: 10, pitch: 0 },
+      '7': { yaw: -10, pitch: 10 }, '8': { yaw: 0, pitch: 10}, '9': { yaw: 10, pitch: 10 },
+    };
+
+    const onKey = (e) => {
+      if (!isCalibrated || !lastNormRef.current) return;
+
+      const zeroL = {
+        x: lastNormRef.current.left.x - gazeOffsetRef.current.left.x,
+        y: lastNormRef.current.left.y - gazeOffsetRef.current.left.y,
+      };
+      const zeroR = {
+        x: lastNormRef.current.right.x - gazeOffsetRef.current.right.x,
+        y: lastNormRef.current.right.y - gazeOffsetRef.current.right.y,
+      };
+
+      if (keyMap[e.key]) {
+        const { yaw, pitch } = keyMap[e.key];
+        addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
+        addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
+      }
+      if (e.key === 'f') {
+        fitCalib('left', 1);
+        fitCalib('right', 1);
+      }
+      if (e.key === 'F') {
+        fitCalib('left', 2);
+        fitCalib('right', 2);
+      }
+    };
+
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isCalibrated]);
 
   const detect = async (net) => {
     if (
@@ -116,7 +199,7 @@ function App() {
     const faces = await net.estimateFaces(video);
     const ctx = canvasRef.current.getContext("2d");
     ctx.clearRect(0, 0, videoWidth, videoHeight); 
-    drawMesh(faces, ctx);
+    // drawMesh(faces, ctx);
 
     if (!faces.length) return;
 
@@ -126,7 +209,7 @@ function App() {
       const Rt = estimateRtHorn(headTemplateRef.current, obsPts);
       if (Rt) {
         RtRef.current = Rt;
-        console.log("R_now:", Rt.R_now, "t_now:", Rt.t_now);
+        // console.log("R_now:", Rt.R_now, "t_now:", Rt.t_now);
 
         const { yaw, pitch, roll } = eulerFromR(Rt.R_now);
         displayPoseInfo(ctx, { angles: { yaw, pitch, roll }, matrices: { R: Rt.R_now } });
@@ -175,12 +258,53 @@ function App() {
           y: smR.y - gazeOffsetRef.current.right.y,
         };
 
-        ctx.fillStyle = "rgba(0,0,0,0.6)";
-        ctx.fillRect(10, 140, 300, 60);
-        ctx.fillStyle = "#fff";
-        ctx.font = "14px Arial";
-        ctx.fillText(`L(x, y) ~ (${zeroL.x.toFixed(2)}, ${zeroL.y.toFixed(2)})`, 20, 160);
-        ctx.fillText(`R(x, y) ~ (${zeroR.x.toFixed(2)}, ${zeroR.y.toFixed(2)})`, 20, 180);
+        const angL = predictEyeAngles('left', zeroL.x, zeroL.y);
+        const angR = predictEyeAngles('right', zeroR.x, zeroR.y);
+
+        const gL_head = eyeAnglesToHeadVec(angL.yaw, angL.pitch);
+        const gR_head = eyeAnglesToHeadVec(angR.yaw, angR.pitch);
+        gazeHeadRef.current.left = gL_head;
+        gazeHeadRef.current.right = gR_head;
+        // console.log('gL_head', gL_head, 'gR_head', gR_head);
+
+        const R = RtRef.current.R_now;
+        if (R) {
+          const gL_cam = headToCamVec(R, gL_head, true);
+          const gR_cam = headToCamVec(R, gR_head, true);
+          console.log('gL_cam', gL_cam, 'gR_cam', gR_cam);
+          const gC_cam = combineCyclopean(gL_cam, gR_cam, 0.5, 0.5);
+          const cy = vecToYawPitchDeg(gC_cam);
+
+          // ctx.fillStyle = "rgba(0,0,0,0.6)";
+          // ctx.fillRect(10, 260, 360, 40);
+          // ctx.fillStyle = "#fff";
+          // ctx.font = "14px Arial";
+          // ctx.fillText(`Cyclopean yaw/pitch = (${cy.yaw.toFixed(1)}°, ${cy.pitch.toFixed(1)}°)`, 20, 285);
+
+          const cCx = 0.5 * (leftEyeFrame.c[0] + rightEyeFrame.c[0]);
+          const cCy = 0.5 * (leftEyeFrame.c[1] + rightEyeFrame.c[1]);
+
+          const scalePx = 140;
+          const denom = Math.max(0.35, gC_cam[2]);
+          const endX = cCx + scalePx * (gC_cam[0] / denom);
+          const endY = cCy - scalePx * (gC_cam[1] / denom);
+
+          drawArrow2D(ctx, cCx, cCy, endX, endY, "#ffeb3b");
+        }
+
+        // ctx.fillStyle = "rgba(0,0,0,0.6)";
+        // ctx.fillRect(10, 140, 300, 60);
+        // ctx.fillStyle = "#fff";
+        // ctx.font = "14px Arial";
+        // ctx.fillText(`L(x, y) ~ (${zeroL.x.toFixed(2)}, ${zeroL.y.toFixed(2)})`, 20, 160);
+        // ctx.fillText(`R(x, y) ~ (${zeroR.x.toFixed(2)}, ${zeroR.y.toFixed(2)})`, 20, 180);
+
+        // ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+        // ctx.fillRect(10, 200, 360, 60);
+        // ctx.fillStyle = "#fff";
+        // ctx.font = "14px Arial";
+        // ctx.fillText(`L yaw/pitch = (${angL.yaw.toFixed(1)} degree, ${angL.pitch.toFixed(1)} degree)`, 20, 220);
+        // ctx.fillText(`R yaw/pitch = (${angR.yaw.toFixed(1)} degree, ${angR.pitch.toFixed(1)} degree)`, 20, 240);
       }
 
       const Lpatch = warpEyePatch(frameImage, leftEyeFrame, 128, 96, 1.4, 1.6);

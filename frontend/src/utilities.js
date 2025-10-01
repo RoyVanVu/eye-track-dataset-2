@@ -1,5 +1,7 @@
 // import { any, cos, mean, mul, relu } from "@tensorflow/tfjs";
 
+import { exp, math } from "@tensorflow/tfjs";
+
 export const TRIANGULATION = [
     127,
     34,
@@ -2809,6 +2811,37 @@ export const TRIANGULATION = [
     ctx.fill();
   };
 
+  export function drawArrow2D(ctx, x0, y0, x1, y1, color="#ff0") {
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len;
+    const uy = dy / len;
+    const headLen = Math.min(14, len * 0.25);
+    const ang = Math.PI / 7;
+
+    const rx = ux * Math.cos(ang) - uy * Math.sin(ang);
+    const ry = ux * Math.sin(ang) + uy * Math.cos(ang);
+    const lx = ux * Math.cos(-ang) - uy * Math.sin(-ang);
+    const ly = ux * Math.sin(-ang) + uy * Math.cos(-ang);
+
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x1 - rx * headLen, y1 - ry * headLen);
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x1 - lx * headLen, y1 - ly * headLen);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  }
+
   export const drawMesh = (predictions, ctx) => {
     if (!predictions || !predictions.length) return;
 
@@ -2990,6 +3023,46 @@ export const TRIANGULATION = [
     }
   }
 
+  export function eyeAnglesToHeadVec(yawDeg, pitchDeg) {
+    const toRad = (d) => d * Math.PI / 180;
+    const y = toRad(yawDeg);
+    const p = toRad(pitchDeg);
+    const sy = Math.sin(y);
+    const cy = Math.cos(y);
+    const sp = Math.sin(p);
+    const cp = Math.cos(p);
+    return [cp * sy, sp, cp * cy];
+  }
+
+  function norm3(v) {
+    const n = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / n, v[1] / n, v[2] / n];
+  }
+
+  export function headToCamVec(R_now, g_head, doNormalize=true) {
+    const v = matVec3(R_now, g_head);
+    return doNormalize ? norm3(v) : v;
+  }
+
+  export function combineCyclopean(gL_cam, gR_cam, wL = 0.5, wR = 0.5) {
+    const x = wL * gL_cam[0] + wR * gR_cam[0];
+    const y = wL * gL_cam[1] + wR * gR_cam[1];
+    const z = wL * gL_cam[2] + wR * gR_cam[2];
+    const n = Math.hypot(x, y, z) || 1;
+    return [x / n, y / n, z / n];
+  }
+
+  export function vecToYawPitchDeg(v_cam) {
+    const yaw = Math.atan2(v_cam[0], v_cam[2]);
+    const pitch = Math.asin(Math.max(-1, Math.min(1, v_cam[1])));
+    const toDeg = (r) => r * 180 / Math.PI;
+    return {
+      yaw: toDeg(yaw),
+      pitch: toDeg(pitch)
+    };
+  }
+
+  // Start rectify part
   function sampleBilinear(srcData, w, h, x, y) {
     const x0 = Math.floor(x), y0 = Math.floor(y);
     const x1 = x0 + 1, y1 = y0 + 1;
@@ -3040,4 +3113,75 @@ export const TRIANGULATION = [
       }
     }
     return out;
+  }
+  // end rectify part
+
+  export function buildFeatures(dx, dy, order=1) {
+    return (order === 1)
+      ? [dx, dy, 1]
+      : [dx, dy, dx * dx, dx * dy, dy * dy, 1];
+  }
+
+  function transpose(A) {
+    return A[0].map((_, j) => A.map(row => row[j]));
+  }
+  function matMul(A, B) {
+    const m = A.length, n = B[0].length, p = B.length;
+    const C = Array.from({length:m}, () => Array(n).fill(0));
+    for (let i = 0; i < m; i++) for (let k = 0; k < p; k++) { 
+      const aik = A[i][k];
+      for (let j = 0; j < n; j++) C[i][j] += aik * B[k][j];
+    }
+    return C;
+  }
+  function matVec(A, x) {
+    const m = A.length, n = A[0].length;
+    const y = new Array(m).fill(0);
+    for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) y[i] += A[i][j] * x[j];
+    return y;
+  }
+  function gaussianSolve(A, b) {
+    const n = A.length;
+    const M = A.map(r => r.slice());
+    const x = b.slice();
+    for (let i = 0; i < n; i++) {
+      let piv = i;
+      for (let r = i + 1; r < n; r++) if(Math.abs(M[r][i]) > Math.abs(M[piv][i])) piv = r;
+      [M[i], M[piv]] = [M[piv], M[i]];
+      [x[i], x[piv]] = [x[piv], x[i]];
+      const s = M[i][i] || 1e-12;
+      for (let j = i; j < n; j++) M[i][j] /= s; x[i] /= s;
+      for (let r = 0; r < n; r++) if(r !== i) {
+        const f = M[r][i];
+        if (!f) continue;
+        for (let j = i; j < n; j++) M[r][j] -= f * M[i][j]; x[r] -= f * x[i];
+      }
+    }
+    return x;
+  }
+
+  export function fitYawPitchModel(samples, order=1) {
+    const X = samples.map(s => buildFeatures(s.dx, s.dy, order));
+    const XT = transpose(X);
+    const XTX = matMul(XT, X);
+    const yYaw = samples.map(s => s.yaw);
+    const yPitch = samples.map(s => s.pitch);
+    const XTyYaw = matVec(XT, yYaw);
+    const XTyPitch = matVec(XT, yPitch);
+    const betaYaw = gaussianSolve(XTX, XTyYaw);
+    const betaPitch = gaussianSolve(XTX, XTyPitch);
+    return { 
+      order, 
+      betaYaw, 
+      betaPitch
+    };
+  }
+
+  export function evalYawPitch(dx, dy, model) {
+    const f = buildFeatures(dx, dy, model.order);
+    const dot =  (w) => w.reduce((acc, wi, i) => acc + wi * f[i], 0);
+    return {
+      yaw: dot(model.betaYaw),
+      pitch: dot(model.betaPitch)
+    };
   }
