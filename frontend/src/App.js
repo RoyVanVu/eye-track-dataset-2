@@ -3,25 +3,27 @@ import * as tf from "@tensorflow/tfjs";
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection'
 import Webcam from "react-webcam";
 import './App.css';
-import { drawMesh, calculateHeadPose, calculateRelativePose, displayPoseInfo,
-         getEyeLocalFrames, drawEyeFrame, getIrisCenters, getNormalizedIris, makeEMA2
+import { drawMesh, displayPoseInfo,
+         getEyeLocalFrames, drawEyeFrame, getIrisCenters, getNormalizedIris, makeEMA2,
+         pickPoint3D, estimateRtHorn, eulerFromR,
+         warpEyePatch
  } from './utilities';
 
 function App() {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const frameCanvasRef = useRef(null); 
+  const leftEyePatchRef = useRef(null);
+  const rightEyePatchRef = useRef(null);
   const emaLeftRef = useRef(makeEMA2(0.6));
   const emaRightRef = useRef(makeEMA2(0.6));
   const lastNormRef = useRef(null);
   const gazeOffsetRef = useRef({ left: {x: 0, y: 0}, right: {x: 0, y: 0} });
+  const headTemplateRef = useRef(null);
+  const RtRef = useRef({ R_now: null, t_now: null });
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
-
-  // useEffect(() => {
-  //   runFacemesh();
-  // }, []);
 
   const handleCalibration = async () => {
     if (
@@ -41,10 +43,10 @@ function App() {
 
       if (face.length > 0) {
         const landmarks = face[0].keypoints.map(kp => [kp.x, kp.y, kp.z]);
-        const pose = calculateHeadPose(landmarks);
-        setCalibrationPose(pose);
+        headTemplateRef.current = pickPoint3D(landmarks);
         setIsCalibrated(true);
-        console.log("Calibration completed with pose:", pose);
+        console.log("Saved head template (rigid set) with", headTemplateRef.current.length, "points");
+
         try {
           if (lastNormRef.current) {
             gazeOffsetRef.current = {
@@ -104,15 +106,33 @@ function App() {
     canvasRef.current.width = videoWidth;
     canvasRef.current.height = videoHeight;
 
+    const fcv = frameCanvasRef.current;
+    fcv.width = videoWidth;
+    fcv.height = videoHeight;
+    const fctx = fcv.getContext("2d");
+    fctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+    const frameImage = fctx.getImageData(0, 0, videoWidth, videoHeight);
+
     const faces = await net.estimateFaces(video);
     const ctx = canvasRef.current.getContext("2d");
-    ctx.clearRect(0, 0, videoWidth, videoHeight); // <- QUAN TRỌNG
+    ctx.clearRect(0, 0, videoWidth, videoHeight); 
+    drawMesh(faces, ctx);
 
     if (!faces.length) return;
 
     const landmarks = faces[0].keypoints.map(kp => [kp.x, kp.y, kp.z]);
+    if (headTemplateRef.current) {
+      const obsPts = pickPoint3D(landmarks);
+      const Rt = estimateRtHorn(headTemplateRef.current, obsPts);
+      if (Rt) {
+        RtRef.current = Rt;
+        console.log("R_now:", Rt.R_now, "t_now:", Rt.t_now);
 
-    // Luôn tính norm + mirror + cache, để nút Calibrate hứng được frame mới nhất
+        const { yaw, pitch, roll } = eulerFromR(Rt.R_now);
+        displayPoseInfo(ctx, { angles: { yaw, pitch, roll }, matrices: { R: Rt.R_now } });
+      }
+    }
+
     let norm = getNormalizedIris(landmarks);
     if (norm) {
       const mirrored = landmarks[263][0] < landmarks[33][0];
@@ -125,15 +145,7 @@ function App() {
       lastNormRef.current = { left: { ...norm.left }, right: { ...norm.right } };
     }
 
-    // Nếu đã calibrate **và** có norm thì mới vẽ/gửi đầu vào cho B4
     if (isCalibrated && norm) {
-      // (tuỳ chọn) nếu chưa dùng, có thể bỏ block grabber này
-      // const grabber = frameCanvasRef.current;
-      // const gctx = grabber.getContext("2d");
-      // grabber.width = videoWidth;
-      // grabber.height = videoHeight;
-      // gctx.drawImage(video, 0, 0, videoWidth, videoHeight);
-
       const { left: leftEyeFrame, right: rightEyeFrame } = getEyeLocalFrames(landmarks);
       drawEyeFrame(ctx, leftEyeFrame, "yellow", 40);
       drawEyeFrame(ctx, rightEyeFrame, "lime", 40);
@@ -151,7 +163,6 @@ function App() {
         ctx.fill();
       }
 
-      // EMA và zero-center (đầu vào B4)
       const smL = emaLeftRef.current(norm.left);
       const smR = emaRightRef.current(norm.right);
       if (smL && smR) {
@@ -172,9 +183,16 @@ function App() {
         ctx.fillText(`R(x, y) ~ (${zeroR.x.toFixed(2)}, ${zeroR.y.toFixed(2)})`, 20, 180);
       }
 
-      const currentPose = calculateHeadPose(landmarks);
-      const relativePose = calculateRelativePose(calibrationPose, currentPose);
-      displayPoseInfo(ctx, relativePose);
+      const Lpatch = warpEyePatch(frameImage, leftEyeFrame, 128, 96, 1.4, 1.6);
+      const Rpatch = warpEyePatch(frameImage, rightEyeFrame, 128, 96, 1.4, 1.6);
+
+      const lcv = leftEyePatchRef.current, rcv = rightEyePatchRef.current;
+      if (lcv && rcv) {
+        lcv.width = Lpatch.width; lcv.height = Lpatch.height;
+        rcv.width = Rpatch.width; rcv.height = Rpatch.height;
+        lcv.getContext("2d").putImageData(Lpatch, 0, 0);
+        rcv.getContext("2d").putImageData(Rpatch, 0, 0);
+      }
     }
   };
 
@@ -210,6 +228,32 @@ function App() {
             zIndex:9,
             width:640,
             height:480
+          }}
+        />
+
+        <canvas 
+          ref={leftEyePatchRef}
+          style={{
+            position:"absolute",
+            left:20,
+            bottom:20,
+            width:128,
+            height:96,
+            zIndex:11,
+            background:"rgba(0, 0, 0, 0.4)"
+          }}
+        />
+
+        <canvas 
+          ref={rightEyePatchRef}
+          style={{
+            position:"absolute",
+            left:170,
+            bottom:20,
+            width:128,
+            height:96,
+            zIndex:11,
+            background:"rgba(0, 0, 0, 0.4)"
           }}
         />
 

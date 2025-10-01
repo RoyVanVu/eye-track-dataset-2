@@ -1,4 +1,4 @@
-import { any, cos, mean, mul, relu } from "@tensorflow/tfjs";
+// import { any, cos, mean, mul, relu } from "@tensorflow/tfjs";
 
 export const TRIANGULATION = [
     127,
@@ -2676,6 +2676,9 @@ export const TRIANGULATION = [
   const mid2 = (a, b) => mul2(add2(a, b), 0.5);
 
   export const getEyeKeyPoints = (lm) => {
+    const L_OUTER = 33,  L_INNER = 133, L_UPMID = 159, L_LOMID = 145;
+    const R_OUTER = 263, R_INNER = 362, R_UPMID = 386, R_LOMID = 374;
+
     const L = {
       inner: v2(lm[L_INNER]),
       outer: v2(lm[L_OUTER]),
@@ -2807,200 +2810,37 @@ export const TRIANGULATION = [
   };
 
   export const drawMesh = (predictions, ctx) => {
-    if (predictions.length > 0) {
-      predictions.forEach((prediction) => {
-        const keypoints = prediction.scaledMesh;
+    if (!predictions || !predictions.length) return;
 
-        for (let i = 0; i < TRIANGULATION.length / 3; i++) {
-          const points = [
-            TRIANGULATION[i * 3],
-            TRIANGULATION[i * 3 + 1],
-            TRIANGULATION[i * 3 + 2],
-          ].map((index) => keypoints[index]);
-          drawPath(ctx, points, true);
-        }
+    predictions.forEach((prediction) => {
+      const ptsRaw =  prediction.keypoints || prediction.scaledMesh;
+      if (!ptsRaw) return;
 
-        for (let i = 0; i < keypoints.length; i++) {
-          const x = keypoints[i][0];
-          const y = keypoints[i][1];
-          ctx.beginPath();
-          ctx.arc(x, y, 1, 0, 3 * Math.PI);
-          ctx.fillStyle = "aqua";
-          ctx.fill();
-        }
-      });
-    }
-  };
+      const keypoints = Array.isArray(ptsRaw) && typeof ptsRaw[0]?.[0] === "number"
+        ? ptsRaw
+        : ptsRaw.map(kp => [kp.x, kp.y, kp.z]);
 
-  const NOSE_TIP = 1;
-  const NOSE_BRIDGE = 6;
-  const LEFT_EYE_CORNER = 33;
-  const RIGHT_EYE_CORNER = 263;
-  const LEFT_MOUTH_CORNER = 61;
-  const RIGHT_MOUTH_CORNER = 291;
-
-  export const L_OUTER = 33; // left eye outer canthus
-  export const L_INNER = 133; // left eye inner canthus
-  export const L_UPMID = 159; // left eye upper mid-lid
-  export const L_LOMID = 145; // left eye lower mid-lid
-
-  export const R_OUTER = 263; // right eye outer canthus
-  export const R_INNER = 362; // right eye inner canthus
-  export const R_UPMID = 386; // right eye upper mid-lid
-  export const R_LOMID = 374; // right eye lower mid-lid
-
-  export const calculateHeadPose = (landmarks) => {
-    const noseTip = landmarks[NOSE_TIP];
-    const noseBridge = landmarks[NOSE_BRIDGE];
-    const leftEye = landmarks[LEFT_EYE_CORNER];
-    const rightEye = landmarks[RIGHT_EYE_CORNER];
-    const leftMouth = landmarks[LEFT_MOUTH_CORNER];
-    const rightMouth = landmarks[RIGHT_MOUTH_CORNER];
-
-    const yaw = calculateYaw(leftEye, rightEye, noseTip);
-    const pitch = calculatePitch(noseTip, noseBridge, leftMouth, rightMouth);
-    const roll = calculateRoll(leftEye, rightEye);
-
-    return { yaw, pitch, roll };
-  };
-
-  const calculateYaw = (leftEye, rightEye, noseTip) => {
-    const eyeCenter = [
-        (leftEye[0] + rightEye[0]) / 2,
-        (leftEye[1] + rightEye[1]) / 2
-    ];
-
-    const deltaX = noseTip[0] - eyeCenter[0];
-    const eyeDistance = Math.abs(rightEye[0] - leftEye[0]);
-
-    let yaw = Math.atan2(deltaX, eyeDistance) * (180 / Math.PI);
-    return Math.round(yaw * 100) / 100;
-  };
-
-  const calculatePitch = (noseTip, noseBridge, leftMouth, rightMouth) => {
-    const mouthCenter = [
-        (leftMouth[0] + rightMouth[0]) / 2,
-        (leftMouth[1] + rightMouth[1]) / 2
-    ];
-
-    const noseToMouthY = mouthCenter[1] - noseTip[1];
-    const noseBridgeToTipY = noseTip[1] - noseBridge[1];
-
-    if (noseBridgeToTipY === 0) return 0;
-
-    let pitch = Math.atan2(noseToMouthY, Math.abs(noseBridgeToTipY)) * (180 / Math.PI) - 90;
-    return Math.round(pitch * 100) / 100;
-  };
-
-  const calculateRoll = (leftEye, rightEye) => {
-    const deltaY = rightEye[1] - leftEye[1];
-    const deltaX = rightEye[0] - leftEye[0];
-
-    let roll = Math.atan2(deltaY, deltaX) * (180 / Math.PI);
-    return Math.round(roll * 100) / 100;
-  };
-
-  export const calculateRelativePose = (calibrationPose, currentPose) => {
-    const relativePose = {
-        yaw: currentPose.yaw - calibrationPose.yaw,
-        pitch: currentPose.pitch - calibrationPose.pitch,
-        roll: currentPose.roll - calibrationPose.roll
-    };
-
-    console.log("Current angles:", currentPose);
-    console.log("Relative angles:", relativePose);
-
-    const matrices = generateRotationMatrices(relativePose);
-    
-    return { angles: relativePose, matrices };
-  };
-
-  const generateRotationMatrices = (angles) => {
-    const { yaw, pitch, roll } = angles;
-    const matrices = {};
-
-    if (Math.abs(yaw) > 0.1) {
-        const yawRad = yaw * (Math.PI / 180);
-        matrices.Ry = [
-            [Math.cos(yawRad), 0, Math.sin(yawRad)],
-            [0, 1, 0],
-            [-Math.sin(yawRad), 0, Math.cos(yawRad)]
-        ];
-        console.log(`Yaw matrix (${yaw.toFixed(2)}):`, matrices.Ry);
-    }
-
-    if (Math.abs(pitch) > 0.1) {
-        const pitchRad = pitch * (Math.PI / 180);
-        matrices.Rx = [
-            [1, 0, 0],
-            [0, Math.cos(pitchRad), -Math.sin(pitchRad)],
-            [0, Math.sin(pitchRad), Math.cos(pitchRad)]
-        ];
-        console.log(`Pitch matrix (${pitch.toFixed(2)}):`, matrices.Rx);
-    }
-
-    if (Math.abs(roll) > 0.1) {
-        const rollRad = roll * (Math.PI / 180);
-        matrices.Rz = [
-            [Math.cos(rollRad), -Math.sin(rollRad), 0],
-            [Math.sin(rollRad), Math.cos(rollRad), 0],
-            [0, 0, 1]
-        ];
-
-        console.log(`Roll matrix (${roll.toFixed(2)}):`, matrices.Rz);
-    }
-
-    if (Object.keys(matrices).length > 0) {
-      const combinedMatrix = calculateCombinedRotationMatrix(matrices);
-      console.log("Combined Rotation Matrix R:", combinedMatrix);
-      matrices.R = combinedMatrix;
-    }
-
-    return matrices;
-  };
-
-  const multiplyMatrices = (a, b) => {
-    const result = [
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0]
-    ];
-
-    for (let i = 0; i < 3; i++) {
-      for (let j = 0; j < 3; j++) {
-        for (let k = 0; k < 3; k++) {
-          result[i][j] += a[i][k] * b[k][j];
-        }
+      for (let i = 0; i < TRIANGULATION.length / 3; i++) {
+        const a = TRIANGULATION[i * 3];
+        const b = TRIANGULATION[i * 3 + 1];
+        const c = TRIANGULATION[i * 3 + 2];
+        const pA = keypoints[a];
+        const pB = keypoints[b];
+        const pC = keypoints[c];
+        if (!pA || !pB || !pC) continue;
+        drawPath(ctx, [pA, pB, pC], true);
       }
-    }
 
-    return result;
+      for (let i = 0; i < keypoints.length; i++) {
+        const [x, y] = keypoints[i];
+        if (x == null || y == null) continue;
+        ctx.beginPath();
+        ctx.arc(x, y, 1, 0, 3 * Math.PI);
+        ctx.fillStyle = "aqua";
+        ctx.fill();
+      }
+    });
   };
-
-  const calculateCombinedRotationMatrix = (matrices) => {
-    let R = [
-      [1, 0, 0],
-      [0, 1, 0],
-      [0, 0, 1]
-    ];
-
-    if (matrices.Rx) {
-      R = multiplyMatrices(R, matrices.Rx);
-      console.log("After applying Rx:", R);
-    }
-
-    if (matrices.Ry) {
-      R = multiplyMatrices(R, matrices.Ry);
-      console.log("After applying Ry:", R);
-    }
-
-    if (matrices.Rz) {
-      R = multiplyMatrices(R, matrices.Rz);
-      console.log("After applying Rz:", R);
-    }
-
-    return R;
-  }
 
   export const displayPoseInfo = (ctx, poseData) => {
     const { angles } = poseData;
@@ -3030,3 +2870,174 @@ export const TRIANGULATION = [
         displayPoseInfo.prevAngles = { ...angles };
     }
   };
+
+  export const RIGID_IDXS = [33, 263, 6, 1, 61, 291]; // L_OUTER, R_OUTER, NOSE_BRIDGE, NOSE_TIP, L_MOUTH, R_MOUTH
+
+  export function pickPoint3D(landmarks, idxs = RIGID_IDXS) {
+    return idxs.map(i => {
+      const p = landmarks[i];
+      return [p[0], p[1], p[2]];
+    });
+  }
+
+  function centroid3D(P) {
+    const n = P.length;
+    let cx = 0, cy = 0, cz = 0;
+    for (const [x, y, z] of P) {
+      cx += x;
+      cy += y;
+      cz += z;
+    }
+    return [cx/n, cy/n, cz/n];
+  }
+
+  function subC3D(P, c) {
+    const [cx, cy, cz] = c;
+    return P.map(([x, y, z]) => [x - cx, y - cy, z - cz])
+  }
+
+  function add3(a, b) {
+    return [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+  }
+
+  function matVec3(M, v) {
+    return [
+      M[0][0] * v[0] + M[0][1] * v[1] + M[0][2] * v[2],
+      M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2],
+      M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
+    ];
+  }
+
+  function buildK(P, Q) {
+    let Sxx = 0, Sxy = 0, Sxz = 0, Syx = 0, Syy = 0, Syz = 0, Szx = 0, Szy = 0, Szz = 0;
+    for (let i = 0; i < P.length; i++) {
+      const [px, py, pz] = P[i], [qx, qy, qz] = Q[i];
+      Sxx += px * qx; Sxy += px * qy; Sxz += px * qz;
+      Syx += py * qx; Syy += py * qy; Syz += py * qz;
+      Szx += pz * qx; Szy += pz * qy; Szz += pz * qz;
+    }
+    const trace = Sxx + Syy + Szz;
+    const K = [
+      [ trace, Syz - Szy,  Szx - Sxz,  Sxy - Syx ],
+      [ Syz - Szy, Sxx - Syy - Szz, Sxy + Syx, Szx + Sxz ],
+      [ Szx - Sxz, Sxy + Syx, -Sxx + Syy - Szz, Syz + Szy ],
+      [ Sxy - Syx, Szx + Sxz, Syz + Szy, -Sxx - Syy + Szz ]
+    ];
+    return K;
+  }
+
+  function dominantEigenvector4(K, iters=30) {
+    let v = [1, 0, 0, 0];
+    for (let t = 0; t < iters; t++) {
+      const w = [
+        K[0][0] * v[0] + K[0][1] * v[1] + K[0][2] * v[2] + K[0][3] * v[3],
+        K[1][0] * v[0] + K[1][1] * v[1] + K[1][2] * v[2] + K[1][3] * v[3],
+        K[2][0] * v[0] + K[2][1] * v[1] + K[2][2] * v[2] + K[2][3] * v[3],
+        K[3][0] * v[0] + K[3][1] * v[1] + K[3][2] * v[2] + K[3][3] * v[3],
+      ];
+      const n = Math.hypot(w[0], w[1], w[2], w[3]) || 1;
+      v = [w[0]/n, w[1]/n, w[2]/n, w[3]/n];
+    }
+    return v;
+  }
+
+  function quatToR(q) {
+    const [w, x, y, z] = q;
+    const xx = x * x, yy = y * y, zz = z * z;
+    const xy = x * y, xz = x * z, yz = y * z;
+    const wx = w * x, wy = w * y, wz = w * z;
+    return [
+      [1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)],
+      [2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)],
+      [2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)],
+    ];
+  }
+
+  export function estimateRtHorn(refPts, obsPts) {
+    if (!refPts || !obsPts || refPts.length !== obsPts.length || refPts.length < 3) {
+      return null;
+    }
+
+    const cRef = centroid3D(refPts);
+    const cObs = centroid3D(obsPts);
+    const Pref = subC3D(refPts, cRef);
+    const Qobs = subC3D(obsPts, cObs);
+    const K = buildK(Pref, Qobs);
+    const q = dominantEigenvector4(K);
+    const R = quatToR(q);
+    const RcRef = matVec3(R, cRef);
+    const t = [ cObs[0] - RcRef[0], cObs[1] - RcRef[1], cObs[2] - RcRef[2] ];
+
+    return {
+      R_now: R, t_now: t
+    };
+  }
+
+  export function eulerFromR(R) {
+    const r00 = R[0][0], r01 = R[0][1], r02 = R[0][2];
+    const r10 = R[1][0], r11 = R[1][1], r12 = R[1][2];
+    const r20 = R[2][0], r21 = R[2][1], r22 = R[2][2]; 
+
+    const pitch = Math.atan2(r21, r22);
+    const yaw = Math.asin(Math.max(-1, Math.min(1, -r20)));
+    const roll = Math.atan2(r10, r00);
+
+    const toDeg = (x) => x * 180 / Math.PI;
+    return {
+      yaw: toDeg(yaw),
+      pitch: toDeg(pitch),
+      roll: toDeg(roll)
+    }
+  }
+
+  function sampleBilinear(srcData, w, h, x, y) {
+    const x0 = Math.floor(x), y0 = Math.floor(y);
+    const x1 = x0 + 1, y1 = y0 + 1;
+    const dx = x - x0, dy = y - y0;
+
+    function px(ix, iy) {
+      const cx = Math.max(0, Math.min(w - 1, ix));
+      const cy = Math.max(0, Math.min(h - 1, iy));
+      const idx = (cy * w + cx) * 4;
+      return [
+        srcData[idx], srcData[idx + 1], srcData[idx + 2], srcData[idx + 3]
+      ];
+    }
+
+    const c00 = px(x0, y0), c10 = px(x1, y0),
+          c01 = px(x0, y1), c11 = px(x1, y1);
+
+    const r = (1 - dx) * (1 - dy) * c00[0] + dx * (1 - dy) * c10[0] + (1 - dx) * dy * c01[0] + dx * dy * c11[0];
+    const g = (1 - dx) * (1 - dy) * c00[1] + dx * (1 - dy) * c10[1] + (1 - dx) * dy * c01[1] + dx * dy * c11[1];
+    const b = (1 - dx) * (1 - dy) * c00[2] + dx * (1 - dy) * c10[2] + (1 - dx) * dy * c01[2] + dx * dy * c11[2];
+    const a = (1 - dx) * (1 - dy) * c00[3] + dx * (1 - dy) * c10[3] + (1 - dx) * dy * c01[3] + dx * dy * c11[3];
+    return [r|0, g|0, b|0, a|0];
+  }
+
+  export function warpEyePatch(srcImg, eyeFrame, outW=128, outH=96, kx=1.4, ky=1.6) {
+    const { data: S, width: SW, height: SH } = srcImg;
+    const { c, u_hat, v_hat, eyeWidth, eyeHeight } = eyeFrame;
+
+    const W = outW, H = outH;
+    const out = new ImageData(W, H);
+
+    const sx = kx * eyeWidth;
+    const sy = ky * eyeHeight;
+
+    for (let j = 0; j < H; j++) {
+      const ny = (j / (H - 1) - 0.5) * sy;
+      for (let i = 0; i < W; i++) {
+        const nx = (i / (W - 1) - 0.5) * sx;
+        const px = c[0] + u_hat[0] * nx + v_hat[0] * ny;
+        const py = c[1] + u_hat[1] * nx + v_hat[1] * ny;
+
+        const [r, g, b, a] = sampleBilinear(S, SW, SH, px, py);
+        const di = (j * W + i) * 4;
+        out.data[di] = r;
+        out.data[di + 1] = g;
+        out.data[di + 2] = b;
+        out.data[di + 3] = 255;
+      }
+    }
+    return out;
+  }
