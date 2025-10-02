@@ -122,18 +122,34 @@ function App() {
     };
   };
 
-  const runFacemesh = async () => {
-    const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
-    const detectorConfig = {
-      runtime: 'tfjs',
-      refineLandmarks: true,
+  useEffect(() => {
+    let intervalId = null;
+    let isRunning = true;
+
+    const runFacemesh = async () => {
+      const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
+      const detectorConfig = {
+        runtime: 'tfjs',
+        refineLandmarks: true,
+      };
+      const detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
+
+      intervalId = setInterval(() => {
+        if (isRunning) {
+          detect(detector);
+        }
+      }, 100);
     };
-    const detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
-    
-    setInterval(() => {
-      detect(detector)
-    }, 100)
-  };
+
+    runFacemesh();
+
+    return () => {
+      isRunning = false;
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [isCalibrated]);
 
   useEffect(() => {
     const keyMap = {
@@ -319,8 +335,6 @@ function App() {
       }
     }
   };
-
-  runFacemesh();
 
   return (
     <div className="App">
