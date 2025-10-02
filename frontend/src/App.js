@@ -11,7 +11,7 @@ import { drawMesh, displayPoseInfo,
          headToCamVec,
          combineCyclopean,
          vecToYawPitchDeg,
-         drawArrow2D
+         drawArrow2D,
  } from './utilities';
 
 function App() {
@@ -277,8 +277,11 @@ function App() {
         const angL = predictEyeAngles('left', zeroL.x, zeroL.y);
         const angR = predictEyeAngles('right', zeroR.x, zeroR.y);
 
-        const gL_head = eyeAnglesToHeadVec(angL.yaw, angL.pitch);
-        const gR_head = eyeAnglesToHeadVec(angR.yaw, angR.pitch);
+        const angL_fix = { yaw: -angL.yaw, pitch: -angL.pitch };
+        const angR_fix = { yaw: -angR.yaw, pitch: -angR.pitch };
+
+        const gL_head = eyeAnglesToHeadVec(angL_fix.yaw, angL_fix.pitch);
+        const gR_head = eyeAnglesToHeadVec(angR_fix.yaw, angR_fix.pitch);
         gazeHeadRef.current.left = gL_head;
         gazeHeadRef.current.right = gR_head;
         // console.log('gL_head', gL_head, 'gR_head', gR_head);
