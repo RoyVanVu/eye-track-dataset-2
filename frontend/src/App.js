@@ -38,9 +38,17 @@ function App() {
     left: [0, 0, 1],
     right: [0, 0, 1]
   });
+  const eyeCalibRef = useRef({
+    active: false,
+    normPoints: [],
+    clicked: [],
+    order: 1
+  });
+  const overlayRef = useRef(null);
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
+  const [calibVersion, setCalibVersions] = useState(0);
 
   const handleCalibration = async () => {
     if (
@@ -122,6 +130,38 @@ function App() {
     };
   };
 
+  const buildGrid = () => {
+    const cols = [0.2, 0.5, 0.8];
+    const rows = [0.25, 0.5, 0.75];
+    const pts = [];
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) pts.push({ u: cols[c], v: rows[r] });
+    return pts;
+  };
+
+  const labelForIndex = (idx) => {
+    const row = Math.floor(idx / 3);
+    const col = idx % 3;
+    const yawVals = [-10, 0, 10];
+    const pitchVals = [-10, 0, 10];
+    return {
+      yaw: yawVals[col],
+      pitch: pitchVals[row]
+    };
+  };
+
+  const startEyeCalibration = () => {
+    if (!isCalibrated) return;
+    eyeCalibRef.current.active = true;
+    eyeCalibRef.current.normPoints = buildGrid();
+    eyeCalibRef.current.clicked = Array(9).fill(false);
+    setCalibVersions(v => v + 1);
+  };
+
+  const stopEyeCalibration = () => {
+    eyeCalibRef.current.active = false;
+    setCalibVersions(v => v + 1);
+  };
+
   useEffect(() => {
     let intervalId = null;
     let isRunning = true;
@@ -151,42 +191,109 @@ function App() {
     };
   }, [isCalibrated]);
 
+  // useEffect(() => {
+  //   const keyMap = {
+  //     '1': { yaw: -10, pitch: -10 }, '2': { yaw: 0, pitch: -10 }, '3': { yaw: 10, pitch: -10 },
+  //     '4': { yaw: -10, pitch: 0 }, '5': { yaw: 0, pitch: 0 }, '6': { yaw: 10, pitch: 0 },
+  //     '7': { yaw: -10, pitch: 10 }, '8': { yaw: 0, pitch: 10}, '9': { yaw: 10, pitch: 10 },
+  //   };
+
+  //   const onKey = (e) => {
+  //     if (!isCalibrated || !lastNormRef.current) return;
+
+  //     const zeroL = {
+  //       x: lastNormRef.current.left.x - gazeOffsetRef.current.left.x,
+  //       y: lastNormRef.current.left.y - gazeOffsetRef.current.left.y,
+  //     };
+  //     const zeroR = {
+  //       x: lastNormRef.current.right.x - gazeOffsetRef.current.right.x,
+  //       y: lastNormRef.current.right.y - gazeOffsetRef.current.right.y,
+  //     };
+
+  //     if (keyMap[e.key]) {
+  //       const { yaw, pitch } = keyMap[e.key];
+  //       addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
+  //       addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
+  //     }
+  //     if (e.key === 'f') {
+  //       fitCalib('left', 1);
+  //       fitCalib('right', 1);
+  //     }
+  //     if (e.key === 'F') {
+  //       fitCalib('left', 2);
+  //       fitCalib('right', 2);
+  //     }
+  //   };
+
+  //   window.addEventListener('keydown', onKey);
+  //   return () => window.removeEventListener('keydown', onKey);
+  // }, [isCalibrated]);
+
   useEffect(() => {
-    const keyMap = {
-      '1': { yaw: -10, pitch: -10 }, '2': { yaw: 0, pitch: -10 }, '3': { yaw: 10, pitch: -10 },
-      '4': { yaw: -10, pitch: 0 }, '5': { yaw: 0, pitch: 0 }, '6': { yaw: 10, pitch: 0 },
-      '7': { yaw: -10, pitch: 10 }, '8': { yaw: 0, pitch: 10}, '9': { yaw: 10, pitch: 10 },
+    const ocv = overlayRef.current;
+    if (!ocv) return;
+    
+    const setSize = () => {
+      ocv.width = window.innerWidth;
+      ocv.height = window.innerHeight;
     };
+    setSize();
+    window.addEventListener("resize", setSize);
 
-    const onKey = (e) => {
-      if (!isCalibrated || !lastNormRef.current) return;
+    const handleClick = (e) => {
+      const ec = eyeCalibRef.current;
+      if (!ec.active || !lastNormRef.current) return;
 
+      const rect = ocv.getBoundingClientRect()
+      const x = (e.clientX - rect.left) * (ocv.width / rect.width);
+      const y = (e.clientY - rect.top) * (ocv.height / rect.height);
+
+      const radius = Math.max(18, Math.min(28, 0.02 * Math.min(ocv.width, ocv.height)));
+      let hitIdx = -1;
+      let minD2 = Infinity;
+      for (let i = 0; i < ec.normPoints.length; i++) {
+        if (ec.clicked[i]) continue;
+        const px = ec.normPoints[i].u * ocv.width;
+        const py = ec.normPoints[i].v * ocv.height;
+        const d2 = (x - px) * (x - px) + (y - py) * (y - py);
+        if (d2 < radius * radius && d2 < minD2) {
+          minD2 = d2;
+          hitIdx = i;
+        }
+      }
+      if (hitIdx === -1) return;
+
+      const smL = emaLeftRef.current(lastNormRef.current.left);
+      const smR = emaRightRef.current(lastNormRef.current.right);
       const zeroL = {
-        x: lastNormRef.current.left.x - gazeOffsetRef.current.left.x,
-        y: lastNormRef.current.left.y - gazeOffsetRef.current.left.y,
+        x: smL.x - gazeOffsetRef.current.left.x,
+        y: smL.y - gazeOffsetRef.current.left.y,
       };
       const zeroR = {
-        x: lastNormRef.current.right.x - gazeOffsetRef.current.right.x,
-        y: lastNormRef.current.right.y - gazeOffsetRef.current.right.y,
+        x: smR.x - gazeOffsetRef.current.right.x,
+        y: smR.y - gazeOffsetRef.current.right.y,
       };
 
-      if (keyMap[e.key]) {
-        const { yaw, pitch } = keyMap[e.key];
-        addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
-        addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
-      }
-      if (e.key === 'f') {
-        fitCalib('left', 1);
-        fitCalib('right', 1);
-      }
-      if (e.key === 'F') {
-        fitCalib('left', 2);
-        fitCalib('right', 2);
+      const { yaw, pitch } = labelForIndex(hitIdx);
+      addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
+      addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
+
+      ec.clicked[hitIdx] = true;
+      setCalibVersions(v => v + 1);
+
+      if (ec.clicked.every(Boolean)) {
+        fitCalib('left', ec.order);
+        fitCalib('right', ec.order);
+        setCalibVersions(v => v + 1);
+        stopEyeCalibration();
       }
     };
 
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    ocv.addEventListener('click', handleClick);
+    return () => {
+      ocv.removeEventListener("click", handleClick);
+      window.removeEventListener("resize", setSize);
+    };
   }, [isCalibrated]);
 
   const detect = async (net) => {
@@ -277,8 +384,8 @@ function App() {
         const angL = predictEyeAngles('left', zeroL.x, zeroL.y);
         const angR = predictEyeAngles('right', zeroR.x, zeroR.y);
 
-        const angL_fix = { yaw: -angL.yaw, pitch: -angL.pitch };
-        const angR_fix = { yaw: -angR.yaw, pitch: -angR.pitch };
+        const angL_fix = { yaw: angL.yaw, pitch: -angL.pitch };
+        const angR_fix = { yaw: angR.yaw, pitch: -angR.pitch };
 
         const gL_head = eyeAnglesToHeadVec(angL_fix.yaw, angL_fix.pitch);
         const gR_head = eyeAnglesToHeadVec(angR_fix.yaw, angR_fix.pitch);
@@ -326,6 +433,38 @@ function App() {
         // ctx.fillText(`R yaw/pitch = (${angR.yaw.toFixed(1)} degree, ${angR.pitch.toFixed(1)} degree)`, 20, 240);
       }
 
+      const ocv = overlayRef.current;
+      if (ocv) {
+        const octx = ocv.getContext("2d");
+        octx.clearRect(0, 0, ocv.width, ocv.height);
+    
+        if (eyeCalibRef.current.active) {
+          const ec = eyeCalibRef.current;
+          const radius = Math.max(10, Math.min(16, 0.012 * Math.min(ocv.width, ocv.height)));
+
+          for (let i = 0; i < ec.normPoints.length; i++) {
+            const { u, v } = ec.normPoints[i];
+            const px = u * ocv.width;
+            const py = v * ocv.height;
+
+            octx.beginPath();
+            octx.arc(px, py, radius, 0, Math.PI * 2);
+            octx.fillStyle = ec.clicked[i] ? "rgba(0, 255, 0, 0.95)" : "rgba(255, 255, 255, 0.9)";
+            octx.fill();
+            octx.lineWidth = 2;
+            octx.strokeStyle = "#222";
+            octx.stroke();
+          }
+
+          const done = ec.clicked.filter(Boolean).length;
+          octx.fillStyle = "rgba(0, 0, 0, 0.6)";
+          octx.fillRect(10, 320, 140, 26);
+          octx.fillStyle = "#fff";
+          octx.font = "14px Arial";
+          octx.fillText(`Eye calib: ${done}/9`, 24, 34);
+        }
+      }
+
       const Lpatch = warpEyePatch(frameImage, leftEyeFrame, 128, 96, 1.4, 1.6);
       const Rpatch = warpEyePatch(frameImage, rightEyeFrame, 128, 96, 1.4, 1.6);
 
@@ -369,6 +508,19 @@ function App() {
             zIndex:9,
             width:640,
             height:480
+          }}
+        />
+
+        <canvas 
+          ref={overlayRef}
+          style={{
+            position:"fixed",
+            inset:0,
+            width:"100vw",
+            height:"100vh",
+            zIndex:20,
+            pointerEvents:eyeCalibRef.current.active ? "auto" : "none",
+            background:"transparent"
           }}
         />
 
@@ -423,6 +575,81 @@ function App() {
         >
           {isCalibrated ? "Calibrated" : "I confirm my head stays straight"}
         </button>
+
+        <button
+          onClick={startEyeCalibration}
+          disabled={!isCalibrated || eyeCalibRef.current.active}
+          style={{
+            position:"absolute",
+            top:20,
+            left:240,
+            zIndex:12,
+            padding:"10px 20px",
+            backgroundColor: !isCalibrated
+              ? "gray"
+              : (eyeCalibRef.current.active ? "#ff9800" : "#673ab7"),
+            color:"white",
+            border:"none",
+            borderRadius:"5px",
+            cursor: (!isCalibrated || eyeCalibRef.current.active) ? "default" : "pointer"
+          }}
+        >
+          {eyeCalibRef.current.active ? "Eye calibration: click 9 dots" : "Calibrate eyes (3x3)"}
+        </button>
+
+        <div
+          style={{
+            position:"absolute",
+            top:70,
+            left:20,
+            zIndex:10,
+            background:"rgba(0, 0, 0, 0.55)",
+            color:"#fff",
+            padding:"6px 8px",
+            borderRadius:"6px"
+          }}
+        >
+          <label>Eye model order: </label>
+          <select
+            value={eyeCalibRef.current.order}
+            onChange={e => { eyeCalibRef.current.order = parseInt(e.target.value, 10); setCalibVersions(v => v + 1); }}
+            disabled={eyeCalibRef.current.active}
+            style={{ marginLeft: 6 }}
+          >
+            <option value={1}>Linear</option>
+            <option value={2}>Quadratic</option>
+          </select>
+        </div>
+
+        <div
+          style={{
+            position:"absolute",
+            top:120,
+            left:20,
+            zIndex:10,
+            background:"rgba(0, 0, 0, 0.55)",
+            color:"#fff",
+            padding:"6px 8px",
+            borderRadius:"6px",
+            minWidth:260
+          }}
+        >
+          <div><b>Eye calib status</b></div>
+          <div>
+            Left: {
+              calibRef.current.left.model
+                ? `Fitted (order ${calibRef.current.left.model.order}, N=${calibRef.current.left.samples.length})`
+                : 'Default gains'
+            }
+          </div>
+          <div>
+            Right: {
+              calibRef.current.right.model
+                ? `Fitted (order ${calibRef.current.right.model.order}, N=${calibRef.current.right.samples.length})`
+                : 'Default gains'
+            }
+          </div>
+        </div>
       </header>
     </div>
   );
