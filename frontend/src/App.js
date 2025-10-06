@@ -45,6 +45,8 @@ function App() {
     order: 1
   });
   const overlayRef = useRef(null);
+  const eyeOriginsHeadRef = useRef({ left: null, right: null });
+  const intrinsicsRef = useRef(null);
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -69,6 +71,41 @@ function App() {
       if (face.length > 0) {
         const landmarks = face[0].keypoints.map(kp => [kp.x, kp.y, kp.z]);
         headTemplateRef.current = pickPoint3D(landmarks);
+
+        const centers = getIrisCenters(landmarks);
+        if (centers) {
+          const tip = landmarks[1], br = landmarks[6];
+          const fwd = (() => {
+            const vx = tip[0] - br[0], vy = tip[1] - br[1], vz = tip[2] - br[2];
+            const n = Math.hypot(vx, vy, vz) || 1;
+            return [vx / n, vy / n, vz / n];
+          })();
+
+          const pdUnits = Math.hypot(
+            centers.left[0] - centers.right[0],
+            centers.left[1] - centers.right[1],
+            (centers.left[2] ?? 0) - (centers.right[2] ?? 0)
+          );
+
+          const EYE_RADIUS_MM = 12, PD_MM = 63;
+          const rUnits = pdUnits * (EYE_RADIUS_MM / PD_MM);
+
+          const oL_head = [
+            centers.left[0] - fwd[0] * rUnits,
+            centers.left[1] - fwd[1] * rUnits,
+            centers.left[2] - fwd[2] * rUnits,
+          ];
+          const oR_head = [
+            centers.right[0] - fwd[0] * rUnits,
+            centers.right[1] - fwd[1] * rUnits,
+            centers.right[2] - fwd[2] * rUnits,
+          ];
+          eyeOriginsHeadRef.current = { left: oL_head, right: oR_head };
+          console.log("Saved eye origins (head frame)", eyeOriginsHeadRef.current);
+        } else {
+          console.warn("No iris centers at calibration; origin fallback will be eye-frame midpoint.");
+        }
+
         setIsCalibrated(true);
         console.log("Saved head template (rigid set) with", headTemplateRef.current.length, "points");
 
@@ -131,8 +168,8 @@ function App() {
   };
 
   const buildGrid = () => {
-    const cols = [0.2, 0.5, 0.8];
-    const rows = [0.25, 0.5, 0.75];
+    const cols = [0.10, 0.5, 0.9];
+    const rows = [0.10, 0.5, 0.9];
     const pts = [];
     for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) pts.push({ u: cols[c], v: rows[r] });
     return pts;
@@ -162,6 +199,18 @@ function App() {
     setCalibVersions(v => v + 1);
   };
 
+  const transformRT = (R, t, p) => ([
+    R[0][0] * p[0] + R[0][1] * p[1] + R[0][2] * p[2] + t[0],
+    R[1][0] * p[0] + R[1][1] * p[1] + R[1][2] * p[2] + t[1],
+    R[2][0] * p[0] + R[2][1] * p[1] + R[2][2] * p[2] + t[2],
+  ])
+
+  const projectCamToPix = (p, K) => {
+    const { fx, fy, cx, cy } = K;
+    const z = Math.max(1e-6, p[2]);
+    return [cx + fx * (p[0] / z), cy - fy * (p[1] / z)];
+  }
+
   useEffect(() => {
     let intervalId = null;
     let isRunning = true;
@@ -190,44 +239,6 @@ function App() {
       }
     };
   }, [isCalibrated]);
-
-  // useEffect(() => {
-  //   const keyMap = {
-  //     '1': { yaw: -10, pitch: -10 }, '2': { yaw: 0, pitch: -10 }, '3': { yaw: 10, pitch: -10 },
-  //     '4': { yaw: -10, pitch: 0 }, '5': { yaw: 0, pitch: 0 }, '6': { yaw: 10, pitch: 0 },
-  //     '7': { yaw: -10, pitch: 10 }, '8': { yaw: 0, pitch: 10}, '9': { yaw: 10, pitch: 10 },
-  //   };
-
-  //   const onKey = (e) => {
-  //     if (!isCalibrated || !lastNormRef.current) return;
-
-  //     const zeroL = {
-  //       x: lastNormRef.current.left.x - gazeOffsetRef.current.left.x,
-  //       y: lastNormRef.current.left.y - gazeOffsetRef.current.left.y,
-  //     };
-  //     const zeroR = {
-  //       x: lastNormRef.current.right.x - gazeOffsetRef.current.right.x,
-  //       y: lastNormRef.current.right.y - gazeOffsetRef.current.right.y,
-  //     };
-
-  //     if (keyMap[e.key]) {
-  //       const { yaw, pitch } = keyMap[e.key];
-  //       addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
-  //       addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
-  //     }
-  //     if (e.key === 'f') {
-  //       fitCalib('left', 1);
-  //       fitCalib('right', 1);
-  //     }
-  //     if (e.key === 'F') {
-  //       fitCalib('left', 2);
-  //       fitCalib('right', 2);
-  //     }
-  //   };
-
-  //   window.addEventListener('keydown', onKey);
-  //   return () => window.removeEventListener('keydown', onKey);
-  // }, [isCalibrated]);
 
   useEffect(() => {
     const ocv = overlayRef.current;
@@ -312,6 +323,22 @@ function App() {
     canvasRef.current.width = videoWidth;
     canvasRef.current.height = videoHeight;
 
+    if (
+      !intrinsicsRef.current ||
+      intrinsicsRef.current._w !== videoWidth ||
+      intrinsicsRef.current._h !== videoHeight
+    ) {
+      const f = 0.8 * Math.min(videoWidth, videoHeight);
+      intrinsicsRef.current = {
+        fx: f,
+        fy: f,
+        cx: videoWidth / 2,
+        cy: videoHeight / 2,
+        _w: videoWidth,
+        _h: videoHeight,
+      };
+    }
+
     const fcv = frameCanvasRef.current;
     fcv.width = videoWidth;
     fcv.height = videoHeight;
@@ -332,8 +359,6 @@ function App() {
       const Rt = estimateRtHorn(headTemplateRef.current, obsPts);
       if (Rt) {
         RtRef.current = Rt;
-        // console.log("R_now:", Rt.R_now, "t_now:", Rt.t_now);
-
         const { yaw, pitch, roll } = eulerFromR(Rt.R_now);
         displayPoseInfo(ctx, { angles: { yaw, pitch, roll }, matrices: { R: Rt.R_now } });
       }
@@ -391,46 +416,73 @@ function App() {
         const gR_head = eyeAnglesToHeadVec(angR_fix.yaw, angR_fix.pitch);
         gazeHeadRef.current.left = gL_head;
         gazeHeadRef.current.right = gR_head;
-        // console.log('gL_head', gL_head, 'gR_head', gR_head);
 
         const R = RtRef.current.R_now;
-        if (R) {
+        const t = RtRef.current.t_now;
+        if (R && t) {
           const gL_cam = headToCamVec(R, gL_head, true);
           const gR_cam = headToCamVec(R, gR_head, true);
-          console.log('gL_cam', gL_cam, 'gR_cam', gR_cam);
           const gC_cam = combineCyclopean(gL_cam, gR_cam, 0.5, 0.5);
-          const cy = vecToYawPitchDeg(gC_cam);
+          
+          let startX, startY, endX, endY;
 
-          // ctx.fillStyle = "rgba(0,0,0,0.6)";
-          // ctx.fillRect(10, 260, 360, 40);
-          // ctx.fillStyle = "#fff";
-          // ctx.font = "14px Arial";
-          // ctx.fillText(`Cyclopean yaw/pitch = (${cy.yaw.toFixed(1)}°, ${cy.pitch.toFixed(1)}°)`, 20, 285);
+          if (eyeOriginsHeadRef.current.left && eyeOriginsHeadRef.current.right) {
+            const oL_cam = transformRT(R, t, eyeOriginsHeadRef.current.left);
+            const oR_cam = transformRT(R, t, eyeOriginsHeadRef.current.right);
+            const oC_cam = [
+              0.5 * (oL_cam[0] + oR_cam[0]),
+              0.5 * (oL_cam[1] + oR_cam[1]),
+              0.5 * (oL_cam[2] + oR_cam[2]),
+            ];
+            
+            const z0 = Math.max(1e-3, oC_cam[2]);
+            const oC_cam_safe = [oC_cam[0], oC_cam[1], z0];
+            [startX, startY] = projectCamToPix(oC_cam_safe, intrinsicsRef.current);
+            
+            const W = videoWidth, H = videoHeight;
+            let s = 0.4 * z0;
+            let tries = 0;
+            const inView = (x, y) => Number.isFinite(x) && Number.isFinite(y) && x >= -W && x <= 2 * W && y >= -H && y <= 2 * H;
 
-          const cCx = 0.5 * (leftEyeFrame.c[0] + rightEyeFrame.c[0]);
-          const cCy = 0.5 * (leftEyeFrame.c[1] + rightEyeFrame.c[1]);
+            while (tries < 6) {
+              const p2_cam = [
+                oC_cam_safe[0] + s * gC_cam[0],
+                oC_cam_safe[1] + s * gC_cam[1],
+                oC_cam_safe[2] + s * gC_cam[2],
+              ];
+              const pt = projectCamToPix(p2_cam, intrinsicsRef.current);
+              if (inView(pt[0], pt[1])) {
+                endX = pt[0]; endY = pt[1];
+                break;
+              }
+              s *= 0.5;
+              tries++;
+            }
 
-          const scalePx = 140;
-          const denom = Math.max(0.35, gC_cam[2]);
-          const endX = cCx + scalePx * (gC_cam[0] / denom);
-          const endY = cCy - scalePx * (gC_cam[1] / denom);
+            const inViewStrict = (x, y) => 
+              Number.isFinite(x) && Number.isFinite(y) && x >= 0 && x <= videoWidth && y >= 0 && y <= videoHeight;
 
-          drawArrow2D(ctx, cCx, cCy, endX, endY, "#ffeb3b");
-        }
+            if (!Number.isFinite(endX) || !Number.isFinite(endY) || !inViewStrict(startX, startY)) {
+              const cCx = 0.5 * (leftEyeFrame.c[0] + rightEyeFrame.c[0]);
+              const cCy = 0.5 * (leftEyeFrame.c[1] + rightEyeFrame.c[1]);
+              startX = cCx; startY = cCy;
 
-        // ctx.fillStyle = "rgba(0,0,0,0.6)";
-        // ctx.fillRect(10, 140, 300, 60);
-        // ctx.fillStyle = "#fff";
-        // ctx.font = "14px Arial";
-        // ctx.fillText(`L(x, y) ~ (${zeroL.x.toFixed(2)}, ${zeroL.y.toFixed(2)})`, 20, 160);
-        // ctx.fillText(`R(x, y) ~ (${zeroR.x.toFixed(2)}, ${zeroR.y.toFixed(2)})`, 20, 180);
+              const denom = Math.max(0.35, gC_cam[2]);
+              const scalePx = 140;
+              endX = cCx + scalePx * (gC_cam[0] / denom);
+              endY = cCy - scalePx * (gC_cam[1] / denom);
+            }
+          } else {
+            const cCx = 0.5 * (leftEyeFrame.c[0] + rightEyeFrame.c[0]);
+            const cCy = 0.5 * (leftEyeFrame.c[1] + rightEyeFrame.c[1]);
+            startX = cCx; startY = cCy;
 
-        // ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-        // ctx.fillRect(10, 200, 360, 60);
-        // ctx.fillStyle = "#fff";
-        // ctx.font = "14px Arial";
-        // ctx.fillText(`L yaw/pitch = (${angL.yaw.toFixed(1)} degree, ${angL.pitch.toFixed(1)} degree)`, 20, 220);
-        // ctx.fillText(`R yaw/pitch = (${angR.yaw.toFixed(1)} degree, ${angR.pitch.toFixed(1)} degree)`, 20, 240);
+            const scalePx = 140;
+            endX = cCx + scalePx * gC_cam[0];
+            endY = cCy - scalePx * gC_cam[1];
+          }      
+          drawArrow2D(ctx, startX, startY, endX, endY, "#ffeb3b");
+        }        
       }
 
       const ocv = overlayRef.current;
@@ -461,7 +513,7 @@ function App() {
           octx.fillRect(10, 320, 140, 26);
           octx.fillStyle = "#fff";
           octx.font = "14px Arial";
-          octx.fillText(`Eye calib: ${done}/9`, 24, 34);
+          octx.fillText(`Eye calib: ${done}/9`, 24, 338);
         }
       }
 

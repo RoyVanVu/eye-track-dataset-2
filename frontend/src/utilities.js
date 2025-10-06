@@ -1,5 +1,3 @@
-// import { any, cos, mean, mul, relu } from "@tensorflow/tfjs";
-
 import { exp, math } from "@tensorflow/tfjs";
 
 export const TRIANGULATION = [
