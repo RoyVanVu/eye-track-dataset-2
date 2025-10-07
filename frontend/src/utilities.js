@@ -2782,6 +2782,15 @@ export const TRIANGULATION = [
     };
   };
 
+  export function debiasEyeYByPitch(z, headAngles, k=0.20) {
+    if (!headAngles) return z;
+    const pitchN = (headAngles.pitch || 0) / 30;
+    return { 
+      x: z.x,
+      y: z.y - k * pitchN
+    };
+  }
+
   export const drawEyeFrame = (ctx, frame, color="yellow", scale=40) => {
     const { u_hat, v_hat, c } = frame; 
     const endU = add2(c, mul2(u_hat, scale)); 
@@ -3265,10 +3274,11 @@ export const TRIANGULATION = [
     return { x: x0 + cx, y: y0 + cy, p3: p, t };
   }
 
-  export function buildGazeFeatureVec(zL, zR, headAngles, order=2) {
-    const yawN = (headAngles?.yaw || 0) / 30;
-    const pitchN = (headAngles?.pitch || 0) / 30;
-    const base = [zL.x, zL.y, zR.x, zR.y, yawN, pitchN];
+  export function buildGazeFeatureVec(zL, zR, headAngles=null, order=2, useHead=false) {
+    const base = useHead
+      ? [zL.x, zL.y, zR.x, zR.y, (headAngles?.yaw || 0) / 30, (headAngles?.pitch || 0) / 30]
+      : [zL.x, zL.y, zR.x, zR.y];
+    
     let feats = [...base, 1];
 
     if (order >= 2) {
@@ -3295,17 +3305,17 @@ export const TRIANGULATION = [
     return s;
   }
 
-  export function fitScreenXYModel(samples, order=2, ridge=1e-5) {
-    const X = samples.map(s => buildGazeFeatureVec(s.zL, s.zR, s.head, order));
+  export function fitScreenXYModel(samples, order=2, ridge=1e-5, useHead=false) {
+    const X = samples.map(s => buildGazeFeatureVec(s.zL, s.zR, s.head, order, useHead));
     const yU = samples.map(s => s.u);
     const yV = samples.map(s => s.v);
     const wU = fitLinearRidge(X, yU, ridge);
     const wV = fitLinearRidge(X, yV, ridge);
-    return { order, wU, wV };
+    return { order, wU, wV, useHead };
   }
 
   export function evalScreenXYModel(zL, zR, headAngles, model) {
-    const f = buildGazeFeatureVec(zL, zR, headAngles, model.order);
+    const f = buildGazeFeatureVec(zL, zR, headAngles, model.order, model.useHead);
     const u = dotVec(model.wU, f);
     const v = dotVec(model.wV, f);
     return { 

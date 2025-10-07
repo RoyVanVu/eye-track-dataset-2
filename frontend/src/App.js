@@ -16,6 +16,7 @@ import { drawMesh, displayPoseInfo,
          intersectRayToScreenXY,
          fitScreenXYModel,
          evalScreenXYModel,
+         debiasEyeYByPitch,
  } from './utilities';
 
 function App() {
@@ -54,7 +55,7 @@ function App() {
   const lastRayRef = useRef({ o: null, g: null });
   const screenCalibRef = useRef({ samples: [], solved: null });
   const xyCalibRef = useRef({ samples: [], model: null });
-  const emaPogRef = useRef(makeEMA2(0.4));
+  const emaPogRef = useRef(makeEMA2(0.25));
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -323,11 +324,13 @@ function App() {
       const v = y / ocv.height;
 
       xyCalibRef.current.samples.push({
-        u, v, zL: zeroL, zR: zeroR, head: { yaw: headAnglesNow.yaw, pitch: headAnglesNow.pitch }
+        u, v, 
+        zL: zeroL, zR: zeroR, 
+        head: null
       });
 
       if (xyCalibRef.current.samples.length >= 6) {
-        xyCalibRef.current.model = fitScreenXYModel(xyCalibRef.current.samples, eyeCalibRef.current.order === 2 ? 2 : 1, 1e-5);
+        xyCalibRef.current.model = fitScreenXYModel(xyCalibRef.current.samples, 2, 1e-5, false);
         console.log("Fitted XY model:", xyCalibRef.current.model);
       } else {
         console.warn("Not enough samples for XY model.");
@@ -581,9 +584,14 @@ function App() {
           octx.fillText(`Eye calib: ${done}/9`, 24, 338);
         }
 
+        const okAperture =
+          leftEyeFrame.eyeHeight  > 0.25 * leftEyeFrame.eyeWidth &&
+          rightEyeFrame.eyeHeight > 0.25 * rightEyeFrame.eyeWidth;
+
         if (!eyeCalibRef.current.active &&
             xyCalibRef.current.model &&
-            lastNormRef.current) {
+            lastNormRef.current &&
+            okAperture) {
           
           const headAnglesNow = (RtRef.current?.R_now)
               ? eulerFromR(RtRef.current.R_now)
@@ -591,10 +599,14 @@ function App() {
 
           const smL = emaLeftRef.current(lastNormRef.current.left);
           const smR = emaRightRef.current(lastNormRef.current.right);
-          const zL = { x: smL.x - gazeOffsetRef.current.left.x, y: smL.y - gazeOffsetRef.current.left.y };
-          const zR = { x: smR.x - gazeOffsetRef.current.right.x, y: smR.y - gazeOffsetRef.current.right.y };
+          
+          const zL_raw = { x: smL.x - gazeOffsetRef.current.left.x, y: smL.y - gazeOffsetRef.current.left.y };
+          const zR_raw = { x: smR.x - gazeOffsetRef.current.right.x, y: smR.y - gazeOffsetRef.current.right.y };
 
-          let { u, v } = evalScreenXYModel(zL, zR, headAnglesNow, xyCalibRef.current.model);
+          const zL = debiasEyeYByPitch(zL_raw, headAnglesNow, 0.20);
+          const zR = debiasEyeYByPitch(zR_raw, headAnglesNow, 0.20);
+
+          let { u, v } = evalScreenXYModel(zL, zR, null, xyCalibRef.current.model);
 
           const uvSm = emaPogRef.current({ x: u, y: v });
           u = uvSm.x; v = uvSm.y;
