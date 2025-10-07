@@ -12,6 +12,10 @@ import { drawMesh, displayPoseInfo,
          combineCyclopean,
          vecToYawPitchDeg,
          drawArrow2D,
+         solveScreenPlaneLS,
+         intersectRayToScreenXY,
+         fitScreenXYModel,
+         evalScreenXYModel,
  } from './utilities';
 
 function App() {
@@ -47,6 +51,10 @@ function App() {
   const overlayRef = useRef(null);
   const eyeOriginsHeadRef = useRef({ left: null, right: null });
   const intrinsicsRef = useRef(null);
+  const lastRayRef = useRef({ o: null, g: null });
+  const screenCalibRef = useRef({ samples: [], solved: null });
+  const xyCalibRef = useRef({ samples: [], model: null });
+  const emaPogRef = useRef(makeEMA2(0.4));
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -191,6 +199,13 @@ function App() {
     eyeCalibRef.current.active = true;
     eyeCalibRef.current.normPoints = buildGrid();
     eyeCalibRef.current.clicked = Array(9).fill(false);
+
+    screenCalibRef.current.samples = [];
+    screenCalibRef.current.solved = null;
+
+    xyCalibRef.current.samples = [];
+    xyCalibRef.current.model = null;
+
     setCalibVersions(v => v + 1);
   };
 
@@ -274,8 +289,27 @@ function App() {
       }
       if (hitIdx === -1) return;
 
+      const ray = lastRayRef.current;
+      if (ray && ray.o && ray.g) {
+        screenCalibRef.current.samples.push({
+          x, y,
+          o: [...ray.o],
+          g: [...ray.g],
+          idx: hitIdx,
+          w: ocv.width,
+          h: ocv.height
+        });
+      } else {
+        console.warn("No 3D gaze ray at click; skip screen sample.")
+      }
+
+      const headAnglesNow = (RtRef.current?.R_now)
+        ? eulerFromR(RtRef.current.R_now)
+        : { yaw: 0, pitch: 0 };
+
       const smL = emaLeftRef.current(lastNormRef.current.left);
       const smR = emaRightRef.current(lastNormRef.current.right);
+
       const zeroL = {
         x: smL.x - gazeOffsetRef.current.left.x,
         y: smL.y - gazeOffsetRef.current.left.y,
@@ -284,6 +318,20 @@ function App() {
         x: smR.x - gazeOffsetRef.current.right.x,
         y: smR.y - gazeOffsetRef.current.right.y,
       };
+
+      const u = x / ocv.width;
+      const v = y / ocv.height;
+
+      xyCalibRef.current.samples.push({
+        u, v, zL: zeroL, zR: zeroR, head: { yaw: headAnglesNow.yaw, pitch: headAnglesNow.pitch }
+      });
+
+      if (xyCalibRef.current.samples.length >= 6) {
+        xyCalibRef.current.model = fitScreenXYModel(xyCalibRef.current.samples, eyeCalibRef.current.order === 2 ? 2 : 1, 1e-5);
+        console.log("Fitted XY model:", xyCalibRef.current.model);
+      } else {
+        console.warn("Not enough samples for XY model.");
+      }
 
       const { yaw, pitch } = labelForIndex(hitIdx);
       addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
@@ -295,6 +343,20 @@ function App() {
       if (ec.clicked.every(Boolean)) {
         fitCalib('left', ec.order);
         fitCalib('right', ec.order);
+
+        const ocv = overlayRef.current;
+        if (ocv && screenCalibRef.current.samples.length >= 5) {
+          const plane = solveScreenPlaneLS(
+            screenCalibRef.current.samples,
+            ocv.width * 0.5,
+            ocv.height * 0.5
+          );
+          screenCalibRef.current.solved = { ...plane, W: ocv.width, H: ocv.height };
+          console.log("Screen plane solved:", screenCalibRef.current.solved);
+        } else {
+          console.warn("Not enough screen samples to solve plane.");
+        }
+
         setCalibVersions(v => v + 1);
         stopEyeCalibration();
       }
@@ -435,8 +497,10 @@ function App() {
               0.5 * (oL_cam[2] + oR_cam[2]),
             ];
             
-            const z0 = Math.max(1e-3, oC_cam[2]);
+            const z0raw = oC_cam[2];
+            const z0 = (Number.isFinite(z0raw) && z0raw > 1e-3) ? z0raw : 1;
             const oC_cam_safe = [oC_cam[0], oC_cam[1], z0];
+            lastRayRef.current = { o: oC_cam_safe, g: gC_cam };
             [startX, startY] = projectCamToPix(oC_cam_safe, intrinsicsRef.current);
             
             const W = videoWidth, H = videoHeight;
@@ -472,6 +536,7 @@ function App() {
               endX = cCx + scalePx * (gC_cam[0] / denom);
               endY = cCy - scalePx * (gC_cam[1] / denom);
             }
+
           } else {
             const cCx = 0.5 * (leftEyeFrame.c[0] + rightEyeFrame.c[0]);
             const cCy = 0.5 * (leftEyeFrame.c[1] + rightEyeFrame.c[1]);
@@ -514,6 +579,63 @@ function App() {
           octx.fillStyle = "#fff";
           octx.font = "14px Arial";
           octx.fillText(`Eye calib: ${done}/9`, 24, 338);
+        }
+
+        if (!eyeCalibRef.current.active &&
+            xyCalibRef.current.model &&
+            lastNormRef.current) {
+          
+          const headAnglesNow = (RtRef.current?.R_now)
+              ? eulerFromR(RtRef.current.R_now)
+              : { yaw: 0, pitch: 0 };
+
+          const smL = emaLeftRef.current(lastNormRef.current.left);
+          const smR = emaRightRef.current(lastNormRef.current.right);
+          const zL = { x: smL.x - gazeOffsetRef.current.left.x, y: smL.y - gazeOffsetRef.current.left.y };
+          const zR = { x: smR.x - gazeOffsetRef.current.right.x, y: smR.y - gazeOffsetRef.current.right.y };
+
+          let { u, v } = evalScreenXYModel(zL, zR, headAnglesNow, xyCalibRef.current.model);
+
+          const uvSm = emaPogRef.current({ x: u, y: v });
+          u = uvSm.x; v = uvSm.y;
+
+          const xpix = Math.max(0, Math.min(ocv.width, u * ocv.width));
+          const ypix = Math.max(0, Math.min(ocv.height, v * ocv.height));
+
+          octx.beginPath();
+          octx.arc(xpix, ypix, 8, 0, Math.PI * 2);
+          octx.fillStyle = "rgba(255, 80, 80, 0.9)";
+          octx.fill();
+          octx.lineWidth = 3;
+          octx.strokeStyle = "white";
+          octx.stroke();
+        } else if (!eyeCalibRef.current.active &&
+            screenCalibRef.current.solved &&
+            lastRayRef.current.o && lastRayRef.current.g) {
+
+          const hit = intersectRayToScreenXY(
+            lastRayRef.current.o,
+            lastRayRef.current.g,
+            screenCalibRef.current.solved
+          );
+
+          if (hit && hit.t > 0 && Number.isFinite(hit.x) && Number.isFinite(hit.y)) {
+            // const ocv = overlayRef.current;
+            const { W, H } = screenCalibRef.current.solved;
+            const sx = ocv.width / W, sy = ocv.height / H;
+            // const hx = hit.x * sx, hy = hit.y * sy;
+            const x = Math.max(0, Math.min(ocv.width, hit.x * sx));
+            const y = Math.max(0, Math.min(ocv.height, hit.y * sy));
+
+            // const octx = ocv.getContext("2d");
+            octx.beginPath();
+            octx.arc(x, y, 8, 0, Math.PI*2);
+            octx.fillStyle = "rgba(255, 80, 80, 0.9)";
+            octx.fill();
+            octx.lineWidth = 3;
+            octx.strokeStyle = "white";
+            octx.stroke();
+          }
         }
       }
 

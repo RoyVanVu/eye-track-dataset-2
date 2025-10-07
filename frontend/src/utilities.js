@@ -1,4 +1,4 @@
-import { exp, math } from "@tensorflow/tfjs";
+import { exp, math, mod } from "@tensorflow/tfjs";
 
 export const TRIANGULATION = [
     127,
@@ -2664,6 +2664,7 @@ export const TRIANGULATION = [
   };
 
   const v2 = (p) => [p[0], p[1]];
+  const v3 = (p) => [p[0], p[1], p[2] ?? 0];
   const add2 = (a, b) => [a[0] + b[0], a[1] + b[1]];
   const sub2 = (a, b) => [a[0] - b[0], a[1] - b[1]];
   const mul2 = (a, s) => [a[0] * s, a[1] * s];
@@ -2739,8 +2740,8 @@ export const TRIANGULATION = [
     }
 
     return {
-      left: v2(landmarks[IRIS_LEFT_CENTER]),
-      right: v2(landmarks[IRIS_RIGHT_CENTER])
+      left: v3(landmarks[IRIS_LEFT_CENTER]),
+      right: v3(landmarks[IRIS_RIGHT_CENTER])
     };
   };
 
@@ -3181,5 +3182,134 @@ export const TRIANGULATION = [
     return {
       yaw: dot(model.betaYaw),
       pitch: dot(model.betaPitch)
+    };
+  }
+
+  function cross3(a, b) {
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  }
+  function dot3(a, b) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+  function sub3(a, b) {
+    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  }
+  function add3s(a, s, b) {
+    return [a[0] + s * b[0], a[1] + s * b[1], a[2] + s * b[2]];
+  }
+
+  export function solveScreenPlaneLS(samples, cx, cy, ridge=1e-8) {
+    const N = samples.length;
+    const M = 9 + N;
+    const R = 3 * N;
+    const A = Array.from({ length: R }, () => Array(M).fill(0));
+    const b = Array(R).fill(0);
+    
+    for (let i = 0; i < N; i++) {
+      const { x, y, o, g } = samples[i];
+      const X = x - cx;
+      const Y = y - cy;
+
+      for (let k = 0; k < 3; k++) {
+        const r = 3 * i + k;
+        A[r][k] = 1;    
+        A[r][3 + k] = X;
+        A[r][6 + k] = Y;
+        A[r][9 + i] = -g[k];
+        b[r] = o[k];
+      } 
+    }
+
+    const AT = transpose(A);
+    const ATA = matMul(AT, A);
+    for (let d = 0; d < M; d++) ATA[d][d] += ridge;
+    const ATb = matVec(AT, b);
+    const s = gaussianSolve(ATA, ATb);
+
+    const O = [s[0], s[1], s[2]];
+    const U = [s[3], s[4], s[5]];
+    const V = [s[6], s[7], s[8]];
+    const t = s.slice(9);
+
+    let rss = 0;
+    for (let i = 0; i < N; i++) {
+      const { x, y, o, g } = samples[i];
+      const X = x - cx;
+      const Y = y - cy;
+      const p_plane = [ O[0] + U[0] * X + V[0] * Y,
+                        O[1] + U[1] * X + V[1] * Y,
+                        O[2] + U[2] * X + V[2] * Y ];
+      const p_ray = add3s(O, t[i], g);
+      const r = sub3(p_ray, p_plane);
+      rss += dot3(r, r);
+    }
+    return { O, U, V, t, cx, cy, rss };
+  }
+
+  export function intersectRayToScreenXY(o, g, plane) {
+    const { O, U, V, cx, cy } = plane;
+    const n = cross3(U, V);
+    const denom = dot3(g, n);
+
+    if (Math.abs(denom) < 1e-8) return null;
+
+    const t = dot3(sub3(O, o), n) / denom;
+    const p = add3s(o, t, g);
+    const M = [[U[0], V[0]], [U[1], V[1]], [U[2], V[2]]];
+    const MT = transpose(M);
+    const MTM = matMul(MT, M);
+    const rhs = sub3(p, O);
+    const MTb = matVec(MT, rhs);
+    const [x0, y0] = gaussianSolve(MTM, MTb);
+
+    return { x: x0 + cx, y: y0 + cy, p3: p, t };
+  }
+
+  export function buildGazeFeatureVec(zL, zR, headAngles, order=2) {
+    const yawN = (headAngles?.yaw || 0) / 30;
+    const pitchN = (headAngles?.pitch || 0) / 30;
+    const base = [zL.x, zL.y, zR.x, zR.y, yawN, pitchN];
+    let feats = [...base, 1];
+
+    if (order >= 2) {
+      for (let i = 0; i < base.length; i++) feats.push(base[i] * base[i]);
+      for (let i = 0; i < base.length; i++)
+        for (let j = i + 1; j < base.length; j++) 
+          feats.push(base[i] * base[j]);
+    }
+    return feats;
+  }
+
+  function fitLinearRidge(X, y, ridge=1e-5) {
+    const XT = transpose(X);
+    const XTX = matMul(XT, X);
+    for (let d = 0; d < XTX.length; d++) XTX[d][d] += ridge;
+    const XTy = matVec(XT, y);
+    const w = gaussianSolve(XTX, XTy);
+    return w;
+  }
+
+  function dotVec(w, f) {
+    let s = 0;
+    for (let i = 0; i < w.length; i++) s += w[i] * (f[i] || 0);
+    return s;
+  }
+
+  export function fitScreenXYModel(samples, order=2, ridge=1e-5) {
+    const X = samples.map(s => buildGazeFeatureVec(s.zL, s.zR, s.head, order));
+    const yU = samples.map(s => s.u);
+    const yV = samples.map(s => s.v);
+    const wU = fitLinearRidge(X, yU, ridge);
+    const wV = fitLinearRidge(X, yV, ridge);
+    return { order, wU, wV };
+  }
+
+  export function evalScreenXYModel(zL, zR, headAngles, model) {
+    const f = buildGazeFeatureVec(zL, zR, headAngles, model.order);
+    const u = dotVec(model.wU, f);
+    const v = dotVec(model.wV, f);
+    return { 
+      u: Math.max(0, Math.min(1, u)),
+      v: Math.max(0, Math.min(1, v)),
     };
   }
