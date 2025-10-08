@@ -320,12 +320,15 @@ function App() {
         y: smR.y - gazeOffsetRef.current.right.y,
       };
 
+      const zL = debiasEyeYByPitch(zeroL, headAnglesNow, 0.20);
+      const zR = debiasEyeYByPitch(zeroR, headAnglesNow, 0.20);
+
       const u = x / ocv.width;
       const v = y / ocv.height;
 
       xyCalibRef.current.samples.push({
         u, v, 
-        zL: zeroL, zR: zeroR, 
+        zL, zR, 
         head: null
       });
 
