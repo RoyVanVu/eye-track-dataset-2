@@ -1,10 +1,11 @@
 import React, {useRef, useState, useEffect} from 'react';
 import * as tf from "@tensorflow/tfjs";
+import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection'
 import Webcam from "react-webcam";
 import './App.css';
 import { drawMesh, displayPoseInfo,
-         getEyeLocalFrames, drawEyeFrame, getIrisCenters, getNormalizedIris, makeEMA2,
+         getEyeLocalFrames, drawEyeFrame, getIrisCenters, getRectifiedIrisOffsets, makeEMA2,
          pickPoint3D, estimateRtHorn, eulerFromR,
          warpEyePatch, fitYawPitchModel, evalYawPitch,
          eyeAnglesToHeadVec,
@@ -17,6 +18,7 @@ import { drawMesh, displayPoseInfo,
          fitScreenXYModel,
          evalScreenXYModel,
          debiasEyeYByPitch,
+         buildEyeLocalFrame,
  } from './utilities';
 
 function App() {
@@ -56,10 +58,25 @@ function App() {
   const screenCalibRef = useRef({ samples: [], solved: null });
   const xyCalibRef = useRef({ samples: [], model: null });
   const emaPogRef = useRef(makeEMA2(0.25));
+  const eyeCanonRef = useRef({ left: null, right: null });
+  const headPoseNamesRef = useRef(['straight', 'left', 'right', 'up', 'down']);
+  const currentPoseIndexRef = useRef(0);
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
   const [calibVersion, setCalibVersions] = useState(0);
+  
+  useEffect(() => {
+    (async () => {
+      try {
+        await tf.setBackend('webgl');
+        await tf.ready();
+        console.log('TFJS backend:', tf.getBackend());
+      } catch (e) {
+        console.error('Init TF failed:', e);
+      }
+    })();
+  }, []);
 
   const handleCalibration = async () => {
     if (
@@ -69,11 +86,24 @@ function App() {
     ) {
       const video = webcamRef.current.video;
       const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
-      const detectorConfig = {
-        runtime: 'tfjs',
-        refineLandmarks: true,
-      };
-      const detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
+      async function makeDetector() {
+        await tf.ready();
+        try {
+          return await faceLandmarksDetection.createDetector(model, {
+            runtime: 'tfjs',
+            refineLandmarks: true,
+            modelUrl: `${window.location.origin}/models/attention_mesh/1/model.json`,
+           });
+        } catch (e) {
+          console.warn('Local attention_mesh failed, fallback to non_iris locally.', e);
+          return await faceLandmarksDetection.createDetector(model, {
+            runtime: 'tfjs',
+            refineLandmarks: false,
+            modelUrl: `${window.location.origin}/models/face_landmarks/1/model.json`,
+          });
+        }
+      }
+      const detector = await makeDetector();
 
       const face = await detector.estimateFaces(video);
 
@@ -119,26 +149,69 @@ function App() {
         console.log("Saved head template (rigid set) with", headTemplateRef.current.length, "points");
 
         try {
+          const R0 = RtRef.current?.R_now;
+          const t0 = RtRef.current?.t_now;
+          if (R0 && t0) {
+            const Lc = { inner: landmarks[133], outer: landmarks[33], up: landmarks[159], down: landmarks[145] };
+            const Rc = { inner: landmarks[362], outer: landmarks[263], up: landmarks[386], down: landmarks[374] };
+
+            const Rt = RtRef.current;
+            const toHead = (p) => {
+              const R = Rt.R_now;
+              const t = Rt.t_now;
+              const Rinv = [[R[0][0], R[1][0], R[2][0]], [R[0][1], R[1][1], R[2][1]], [R[0][2], R[1][2], R[2][2]]];
+              const q = [p[0] - t[0], p[1] - t[1], p[2] - t[2]];
+              return [
+                Rinv[0][0] * q[0] + Rinv[0][1] * q[1] + Rinv[0][2] * q[2],
+                Rinv[1][0] * q[0] + Rinv[1][1] * q[1] + Rinv[1][2] * q[2],
+                Rinv[2][0] * q[0] + Rinv[2][1] * q[1] + Rinv[2][2] * q[2],
+              ];
+            };
+
+            const Lh = { inner: toHead(Lc.inner), outer: toHead(Lc.outer), up: toHead(Lc.up), down: toHead(Lc.down) };
+            const Rh = { inner: toHead(Rc.inner), outer: toHead(Rc.outer), up: toHead(Rc.up), down: toHead(Rc.down) };
+
+            const mkCanon = (E) => {
+              const eye2D = {
+                inner: [E.inner[0], E.inner[1]],
+                outer: [E.outer[0], E.outer[1]],
+                up: [E.up[0], E.up[1]],
+                down: [E.down[0], E.down[1]],
+              };
+              return buildEyeLocalFrame(eye2D);
+            };
+
+            eyeCanonRef.current = { left: mkCanon(Lh), right: mkCanon(Rh) };
+            console.log('Saved canonical eye frames (head-frame):', eyeCanonRef.current);
+          } else {
+            console.warn('Rt not ready at calibration; canonical eye frames not saved.');
+          }
+        } catch (e) {
+          console.warn('Saved canonical eye frames failed:', e);
+        }
+
+        try {
+          const R_calib = RtRef.current?.R_now || [
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1]
+          ];
+
           if (lastNormRef.current) {
             gazeOffsetRef.current = {
               left: { ...lastNormRef.current.left },
               right: { ...lastNormRef.current.right },
             };
           } else {
-            const norm0 = getNormalizedIris(landmarks);
+            const norm0 = getRectifiedIrisOffsets(landmarks, R_calib, RtRef.current?.t_now || [0, 0, 0], eyeCanonRef.current);
             if (norm0) {
-              const mirrored0 = landmarks[263][0] < landmarks[33][0];
-              if (mirrored0) {
-                norm0.left.x *= -1;
-                norm0.right.x *= -1;
-              }
               gazeOffsetRef.current = {
                 left: { ...norm0.left },
                 right: { ...norm0.right },
               };
             }
           }
-          console.log("Gaze offset set:", gazeOffsetRef.current);
+          console.log("Gaze offset set (rectified):", gazeOffsetRef.current);
         } catch (e) {
           console.warn("Failed to set gaze offset:", e);
         }
@@ -199,7 +272,8 @@ function App() {
     if (!isCalibrated) return;
     eyeCalibRef.current.active = true;
     eyeCalibRef.current.normPoints = buildGrid();
-    eyeCalibRef.current.clicked = Array(9).fill(false);
+    eyeCalibRef.current.clicked = [];
+    currentPoseIndexRef.current = 0;
 
     screenCalibRef.current.samples = [];
     screenCalibRef.current.solved = null;
@@ -233,11 +307,24 @@ function App() {
 
     const runFacemesh = async () => {
       const model = faceLandmarksDetection.SupportedModels.MediaPipeFaceMesh;
-      const detectorConfig = {
-        runtime: 'tfjs',
-        refineLandmarks: true,
-      };
-      const detector = await faceLandmarksDetection.createDetector(model, detectorConfig);
+      async function makeDetector() {
+        await tf.ready();
+        try {
+          return await faceLandmarksDetection.createDetector(model, {
+            runtime: 'tfjs',
+            refineLandmarks: true,
+            modelUrl: `${window.location.origin}/models/attention_mesh/1/model.json`,
+          });
+        } catch (e) {
+          console.warn('Local attention_mesh failed, fallback to non-iris locally.', e);
+          return await faceLandmarksDetection.createDetector(model, {
+            runtime: 'tfjs',
+            refineLandmarks: false,
+            modelUrl: `${window.location.origin}/models/face_landmarks/1/model.json`,
+          });
+        }
+      }
+      const detector = await makeDetector();
 
       intervalId = setInterval(() => {
         if (isRunning) {
@@ -279,7 +366,7 @@ function App() {
       let hitIdx = -1;
       let minD2 = Infinity;
       for (let i = 0; i < ec.normPoints.length; i++) {
-        if (ec.clicked[i]) continue;
+        if ((ec.clicked[i] || 0) >= 5) continue;
         const px = ec.normPoints[i].u * ocv.width;
         const py = ec.normPoints[i].v * ocv.height;
         const d2 = (x - px) * (x - px) + (y - py) * (y - py);
@@ -289,6 +376,14 @@ function App() {
         }
       }
       if (hitIdx === -1) return;
+
+      const alreadyClicked = ec.clicked[hitIdx] || 0;
+      const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
+
+      if (alreadyClicked >= currentPoseIndexRef.current + 1) {
+        console.warn(`Point ${hitIdx} pose ${poseName} already collected`);
+        return;
+      }
 
       const ray = lastRayRef.current;
       if (ray && ray.o && ray.g) {
@@ -320,8 +415,8 @@ function App() {
         y: smR.y - gazeOffsetRef.current.right.y,
       };
 
-      const zL = debiasEyeYByPitch(zeroL, headAnglesNow, 0.20);
-      const zR = debiasEyeYByPitch(zeroR, headAnglesNow, 0.20);
+      const zL = zeroL;
+      const zR = zeroR;
 
       const u = x / ocv.width;
       const v = y / ocv.height;
@@ -329,11 +424,11 @@ function App() {
       xyCalibRef.current.samples.push({
         u, v, 
         zL, zR, 
-        head: null
+        head: headAnglesNow
       });
 
       if (xyCalibRef.current.samples.length >= 6) {
-        xyCalibRef.current.model = fitScreenXYModel(xyCalibRef.current.samples, 2, 1e-5, false);
+        xyCalibRef.current.model = fitScreenXYModel(xyCalibRef.current.samples, 2, 1e-5, true);
         console.log("Fitted XY model:", xyCalibRef.current.model);
       } else {
         console.warn("Not enough samples for XY model.");
@@ -343,10 +438,22 @@ function App() {
       addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
       addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
 
-      ec.clicked[hitIdx] = true;
-      setCalibVersions(v => v + 1);
+      ec.clicked[hitIdx] = alreadyClicked + 1;
 
-      if (ec.clicked.every(Boolean)) {
+      const headAngles = eulerFromR(RtRef.current.R_now);
+      console.log(`Point ${hitIdx}, Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
+
+      currentPoseIndexRef.current++;
+
+      if (currentPoseIndexRef.current >= headPoseNamesRef.current.length) {
+        currentPoseIndexRef.current = 0;
+      }
+
+      setCalibVersions(v => v + 1);
+      const allDone = ec.clicked.length === 9 && ec.clicked.every(c => (c || 0) >= 5);
+
+      if (allDone) {
+        console.log("All 45 samples collected");
         fitCalib('left', ec.order);
         fitCalib('right', ec.order);
 
@@ -432,16 +539,13 @@ function App() {
       }
     }
 
-    let norm = getNormalizedIris(landmarks);
-    if (norm) {
-      const mirrored = landmarks[263][0] < landmarks[33][0];
-      if (mirrored) {
-        norm = {
-          left:  { x: -norm.left.x,  y: norm.left.y  },
-          right: { x: -norm.right.x, y: norm.right.y },
-        };
+    const R_now = RtRef.current?.R_now;
+    let norm = null;
+    if (R_now) {
+      norm = getRectifiedIrisOffsets(landmarks, R_now, RtRef.current?.t_now, eyeCanonRef.current);
+      if (norm) {
+        lastNormRef.current = { left: { ...norm.left }, right: { ...norm.right } };
       }
-      lastNormRef.current = { left: { ...norm.left }, right: { ...norm.right } };
     }
 
     if (isCalibrated && norm) {
@@ -579,12 +683,37 @@ function App() {
             octx.stroke();
           }
 
-          const done = ec.clicked.filter(Boolean).length;
+          const totalSamples = ec.clicked.reduce((sum, count) => sum + (count || 0), 0);
           octx.fillStyle = "rgba(0, 0, 0, 0.6)";
           octx.fillRect(10, 320, 140, 26);
           octx.fillStyle = "#fff";
           octx.font = "14px Arial";
-          octx.fillText(`Eye calib: ${done}/9`, 24, 338);
+          octx.fillText(`Eye calib: ${totalSamples}/45`, 24, 338);
+        }
+
+        if (eyeCalibRef.current.active) {
+          const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
+          const poseInstructions = {
+            straight: "Look STRAIGHT ahead",
+            left: "Turn head LEFT ~20",
+            right: "Turn head RIGHT ~20",
+            up: "Tilt head UP ~15",
+            down: "Tilt head DOWN ~15"
+          };
+
+          octx.save();
+          octx.fillStyle = "rgba(0, 0, 0, 0.7)";
+          octx.fillRect(ocv.width / 2 - 200, 50, 400, 100);
+
+          octx.fillStyle = "#FFD700";
+          octx.font = "bold 24px Arial";
+          octx.textAlign = "center";
+          octx.fillText(`Pose ${currentPoseIndexRef.current + 1}/5`, ocv.width / 2, 90);
+
+          octx.fillStyle = "white";
+          octx.font = "20px Arial";
+          octx.fillText(poseInstructions[poseName] || poseName, ocv.width / 2, 125);
+          octx.restore();
         }
 
         const okAperture =
@@ -606,10 +735,10 @@ function App() {
           const zL_raw = { x: smL.x - gazeOffsetRef.current.left.x, y: smL.y - gazeOffsetRef.current.left.y };
           const zR_raw = { x: smR.x - gazeOffsetRef.current.right.x, y: smR.y - gazeOffsetRef.current.right.y };
 
-          const zL = debiasEyeYByPitch(zL_raw, headAnglesNow, 0.20);
-          const zR = debiasEyeYByPitch(zR_raw, headAnglesNow, 0.20);
+          const zL = zL_raw;
+          const zR = zR_raw;
 
-          let { u, v } = evalScreenXYModel(zL, zR, null, xyCalibRef.current.model);
+          let { u, v } = evalScreenXYModel(zL, zR, headAnglesNow, xyCalibRef.current.model);
 
           const uvSm = emaPogRef.current({ x: u, y: v });
           u = uvSm.x; v = uvSm.y;
@@ -783,7 +912,7 @@ function App() {
             cursor: (!isCalibrated || eyeCalibRef.current.active) ? "default" : "pointer"
           }}
         >
-          {eyeCalibRef.current.active ? "Eye calibration: click 9 dots" : "Calibrate eyes (3x3)"}
+          {eyeCalibRef.current.active ? "Eye calibration: 5 poses per dot (45 total)" : "Calibrate eyes (9 dots x 5 poses)"}
         </button>
 
         <div

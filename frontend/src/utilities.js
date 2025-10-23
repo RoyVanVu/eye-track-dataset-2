@@ -2756,6 +2756,14 @@ export const TRIANGULATION = [
     return { x, y };
   };
 
+  export function projectIrisToCanonical(eyeCanon, iris_head_xy) {
+    const rel = [iris_head_xy[0] - eyeCanon.c[0], iris_head_xy[1] - eyeCanon.c[1]];
+    const x = (rel[0] * eyeCanon.u_hat[0] + rel[1] * eyeCanon.u_hat[1]) / (0.5 * eyeCanon.eyeWidth);
+    const y = (rel[0] * eyeCanon.v_hat[0] + rel[1] * eyeCanon.v_hat[1]) / (0.5 * eyeCanon.eyeHeight);
+
+    return { x, y };
+  }
+
   export const getNormalizedIris = (landmarks) => {
     const frames = getEyeLocalFrames(landmarks);
     const centers = getIrisCenters(landmarks);
@@ -2912,7 +2920,12 @@ export const TRIANGULATION = [
     }
   };
 
-  export const RIGID_IDXS = [33, 263, 6, 1, 61, 291]; // L_OUTER, R_OUTER, NOSE_BRIDGE, NOSE_TIP, L_MOUTH, R_MOUTH
+  export const RIGID_IDXS = [
+    33, 133,  
+    263, 362, 
+    1, 6, 10,
+    297, 332
+  ]; 
 
   export function pickPoint3D(landmarks, idxs = RIGID_IDXS) {
     return idxs.map(i => {
@@ -2947,6 +2960,100 @@ export const TRIANGULATION = [
       M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2],
       M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
     ];
+  }
+
+  function transpose3x3(R) {
+    return [
+      [R[0][0], R[1][0], R[2][0]],
+      [R[0][1], R[1][1], R[2][1]],
+      [R[0][2], R[1][2], R[2][2]],
+    ];
+  }
+
+  function camToHeadPoint(p_cam, R_now, t_now) {
+    const R_inv = transpose3x3(R_now);
+    const pc_minus_t = [p_cam[0] - t_now[0], p_cam[1] - t_now[1], p_cam[2] - t_now[2]];
+    return matVec3(R_inv, pc_minus_t);
+  }
+
+  function getEyeLandmarks3D(landmarks, eyeSide) {
+    if (eyeSide === 'left') {
+      return {
+        inner: v3(landmarks[133]), // L_INNER
+        outer: v3(landmarks[33]), // L_OUTER
+        up: v3(landmarks[159]), // L_UPMID
+        down: v3(landmarks[145]), // L_LOMID
+        iris: v3(landmarks[IRIS_LEFT_CENTER])
+      };
+    } else {
+      return {
+        inner: v3(landmarks[362]), // R_INNER
+        outer: v3(landmarks[263]), // R_OUTER
+        up: v3(landmarks[386]), // R_UPMID
+        down: v3(landmarks[374]), // R_LOMID
+        iris: v3(landmarks[IRIS_RIGHT_CENTER])
+      };
+    }
+  }
+
+  export function getRectifiedIrisOffset(landmarks, R_now, t_now, eyeSide, eyeCanon) {
+    if (!landmarks || !R_now) return null;
+
+    const eye3D_cam = getEyeLandmarks3D(landmarks, eyeSide);
+    const eye3D_head = {
+      inner: camToHeadPoint(eye3D_cam.inner, R_now, t_now),
+      outer: camToHeadPoint(eye3D_cam.outer, R_now, t_now),
+      up: camToHeadPoint(eye3D_cam.up, R_now, t_now),
+      down: camToHeadPoint(eye3D_cam.down, R_now, t_now),
+      iris: camToHeadPoint(eye3D_cam.iris, R_now, t_now)
+    };
+
+    if (eyeSide === 'left') {
+      console.log(`[${eyeSide}] iris HEAD FRAME:`, {
+        x: eye3D_head.iris[0].toFixed(3),
+        y: eye3D_head.iris[1].toFixed(3),
+        z: eye3D_head.iris[2].toFixed(3)
+      });
+    }
+
+    const iris2D_canonical = [eye3D_head.iris[0], eye3D_head.iris[1]];
+    let offset;
+    if (eyeCanon) {
+      offset = projectIrisToCanonical(eyeCanon, iris2D_canonical);
+    } else {
+      const eye2D = {
+        inner: [eye3D_head.inner[0], eye3D_head.inner[1]],
+        outer: [eye3D_head.outer[0], eye3D_head.outer[1]],
+        up: [eye3D_head.up[0], eye3D_head.up[1]],
+        down: [eye3D_head.down[0], eye3D_head.down[1]],
+      };
+      const eyeFrame = buildEyeLocalFrame(eye2D);
+      offset = irisToLocal(eyeFrame, iris2D_canonical);
+    }
+
+    if (eyeSide === 'left') {
+      console.log(`[${eyeSide}] FINAL OFFSET:`, {
+        x: offset.x.toFixed(3),
+        y: offset.y.toFixed(3)
+      });
+      console.log('─────────────────────────');
+    }
+
+    return offset;
+  }
+
+  export function getRectifiedIrisOffsets(landmarks, R_now, t_now, eyeCanonPack=null) {
+    if (!landmarks || !R_now) return null;
+
+    const left = getRectifiedIrisOffset(landmarks, R_now, t_now, 'left', eyeCanonPack?.left || null);
+    const right = getRectifiedIrisOffset(landmarks, R_now, t_now, 'right', eyeCanonPack?.right || null);
+
+    if (!left || !right) return null;
+
+    return {
+      left, 
+      right
+    };
   }
 
   function buildK(P, Q) {
