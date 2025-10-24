@@ -61,6 +61,7 @@ function App() {
   const eyeCanonRef = useRef({ left: null, right: null });
   const headPoseNamesRef = useRef(['straight', 'left', 'right', 'up', 'down']);
   const currentPoseIndexRef = useRef(0);
+  const poseClickedDotsRef = useRef([]);
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -274,6 +275,7 @@ function App() {
     eyeCalibRef.current.normPoints = buildGrid();
     eyeCalibRef.current.clicked = [];
     currentPoseIndexRef.current = 0;
+    poseClickedDotsRef.current = [];
 
     screenCalibRef.current.samples = [];
     screenCalibRef.current.solved = null;
@@ -365,8 +367,9 @@ function App() {
       const radius = Math.max(18, Math.min(28, 0.02 * Math.min(ocv.width, ocv.height)));
       let hitIdx = -1;
       let minD2 = Infinity;
+
       for (let i = 0; i < ec.normPoints.length; i++) {
-        if ((ec.clicked[i] || 0) >= 5) continue;
+        if (poseClickedDotsRef.current.includes(i)) continue;
         const px = ec.normPoints[i].u * ocv.width;
         const py = ec.normPoints[i].v * ocv.height;
         const d2 = (x - px) * (x - px) + (y - py) * (y - py);
@@ -375,20 +378,15 @@ function App() {
           hitIdx = i;
         }
       }
+
       if (hitIdx === -1) return;
 
-      const alreadyClicked = ec.clicked[hitIdx] || 0;
       const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
-
-      if (alreadyClicked >= currentPoseIndexRef.current + 1) {
-        console.warn(`Point ${hitIdx} pose ${poseName} already collected`);
-        return;
-      }
-
       const ray = lastRayRef.current;
+
       if (ray && ray.o && ray.g) {
         screenCalibRef.current.samples.push({
-          x, y,
+          x, y, 
           o: [...ray.o],
           g: [...ray.g],
           idx: hitIdx,
@@ -396,7 +394,7 @@ function App() {
           h: ocv.height
         });
       } else {
-        console.warn("No 3D gaze ray at click; skip screen sample.")
+        console.warn("No 3D gaze ray at click; skip screen sample.");
       }
 
       const headAnglesNow = (RtRef.current?.R_now)
@@ -408,12 +406,12 @@ function App() {
 
       const zeroL = {
         x: smL.x - gazeOffsetRef.current.left.x,
-        y: smL.y - gazeOffsetRef.current.left.y,
+        y: smL.y - gazeOffsetRef.current.left.y
       };
       const zeroR = {
         x: smR.x - gazeOffsetRef.current.right.x,
-        y: smR.y - gazeOffsetRef.current.right.y,
-      };
+        y: smR.y - gazeOffsetRef.current.right.y
+      }
 
       const zL = zeroL;
       const zR = zeroR;
@@ -423,7 +421,7 @@ function App() {
 
       xyCalibRef.current.samples.push({
         u, v, 
-        zL, zR, 
+        zL, zR,
         head: headAnglesNow
       });
 
@@ -438,19 +436,24 @@ function App() {
       addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
       addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
 
-      ec.clicked[hitIdx] = alreadyClicked + 1;
+      poseClickedDotsRef.current.push(hitIdx);
+      ec.clicked[hitIdx] = (ec.clicked[hitIdx] || 0) + 1;
 
       const headAngles = eulerFromR(RtRef.current.R_now);
-      console.log(`Point ${hitIdx}, Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
-
-      currentPoseIndexRef.current++;
-
-      if (currentPoseIndexRef.current >= headPoseNamesRef.current.length) {
-        currentPoseIndexRef.current = 0;
-      }
+      console.log(`Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
 
       setCalibVersions(v => v + 1);
-      const allDone = ec.clicked.length === 9 && ec.clicked.every(c => (c || 0) >= 5);
+
+      if (poseClickedDotsRef.current.length === 9) {
+        console.log(`Completed pose ${currentPoseIndexRef.current + 1}/5 (${poseName})`);
+
+        currentPoseIndexRef.current++;
+        poseClickedDotsRef.current = [];
+
+        setCalibVersions(v => v + 1);
+      }
+
+      const allDone = currentPoseIndexRef.current >= headPoseNamesRef.current.length;
 
       if (allDone) {
         console.log("All 45 samples collected");
@@ -676,7 +679,9 @@ function App() {
 
             octx.beginPath();
             octx.arc(px, py, radius, 0, Math.PI * 2);
-            octx.fillStyle = ec.clicked[i] ? "rgba(0, 255, 0, 0.95)" : "rgba(255, 255, 255, 0.9)";
+            octx.fillStyle = poseClickedDotsRef.current.includes(i)
+              ? "rgba(0, 255, 0, 0.95)"
+              : "rgba(255, 255, 255, 0.9)";
             octx.fill();
             octx.lineWidth = 2;
             octx.strokeStyle = "#222";
@@ -684,11 +689,12 @@ function App() {
           }
 
           const totalSamples = ec.clicked.reduce((sum, count) => sum + (count || 0), 0);
+          const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/45`;
           octx.fillStyle = "rgba(0, 0, 0, 0.6)";
           octx.fillRect(10, 320, 140, 26);
           octx.fillStyle = "#fff";
           octx.font = "14px Arial";
-          octx.fillText(`Eye calib: ${totalSamples}/45`, 24, 338);
+          octx.fillText(`Eye calib: ${currentProgress}`, 24, 338);
         }
 
         if (eyeCalibRef.current.active) {
@@ -708,7 +714,7 @@ function App() {
           octx.fillStyle = "#FFD700";
           octx.font = "bold 24px Arial";
           octx.textAlign = "center";
-          octx.fillText(`Pose ${currentPoseIndexRef.current + 1}/5`, ocv.width / 2, 90);
+          octx.fillText(`Pose ${currentPoseIndexRef.current + 1}/5 - Click ${poseClickedDotsRef.current.length}/9 dots`, ocv.width / 2, 90);
 
           octx.fillStyle = "white";
           octx.font = "20px Arial";
