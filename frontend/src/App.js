@@ -59,7 +59,7 @@ function App() {
   const xyCalibRef = useRef({ samples: [], model: null });
   const emaPogRef = useRef(makeEMA2(0.25));
   const eyeCanonRef = useRef({ left: null, right: null });
-  const headPoseNamesRef = useRef(['straight', 'left', 'right', 'up', 'down']);
+  const headPoseNamesRef = useRef(['straight', 'left', 'right', 'up', 'down', 'tilt-left', 'tilt-right']);
   const currentPoseIndexRef = useRef(0);
   const poseClickedDotsRef = useRef([]);
 
@@ -440,12 +440,12 @@ function App() {
       ec.clicked[hitIdx] = (ec.clicked[hitIdx] || 0) + 1;
 
       const headAngles = eulerFromR(RtRef.current.R_now);
-      console.log(`Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
+      console.log(`Pose ${currentPoseIndexRef.current + 1}/7 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
 
       setCalibVersions(v => v + 1);
 
       if (poseClickedDotsRef.current.length === 9) {
-        console.log(`Completed pose ${currentPoseIndexRef.current + 1}/5 (${poseName})`);
+        console.log(`Completed pose ${currentPoseIndexRef.current + 1}/7 (${poseName})`);
 
         currentPoseIndexRef.current++;
         poseClickedDotsRef.current = [];
@@ -689,7 +689,7 @@ function App() {
           }
 
           const totalSamples = ec.clicked.reduce((sum, count) => sum + (count || 0), 0);
-          const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/45`;
+          const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/63`;
           octx.fillStyle = "rgba(0, 0, 0, 0.6)";
           octx.fillRect(10, 320, 140, 26);
           octx.fillStyle = "#fff";
@@ -704,7 +704,9 @@ function App() {
             left: "Turn head LEFT ~20",
             right: "Turn head RIGHT ~20",
             up: "Tilt head UP ~15",
-            down: "Tilt head DOWN ~15"
+            down: "Tilt head DOWN ~15",
+            "tilt-left": "Tilt head to LEFT shoulder",
+            "tilt-right": "Tilt head to right shoulder"
           };
 
           octx.save();
@@ -714,7 +716,7 @@ function App() {
           octx.fillStyle = "#FFD700";
           octx.font = "bold 24px Arial";
           octx.textAlign = "center";
-          octx.fillText(`Pose ${currentPoseIndexRef.current + 1}/5 - Click ${poseClickedDotsRef.current.length}/9 dots`, ocv.width / 2, 90);
+          octx.fillText(`Pose ${currentPoseIndexRef.current + 1}/7 - Click ${poseClickedDotsRef.current.length}/9 dots`, ocv.width / 2, 90);
 
           octx.fillStyle = "white";
           octx.font = "20px Arial";
@@ -918,7 +920,7 @@ function App() {
             cursor: (!isCalibrated || eyeCalibRef.current.active) ? "default" : "pointer"
           }}
         >
-          {eyeCalibRef.current.active ? "Eye calibration: 5 poses per dot (45 total)" : "Calibrate eyes (9 dots x 5 poses)"}
+          {eyeCalibRef.current.active ? "Eye calibration: 7 poses per dot (63 total)" : "Calibrate eyes (9 dots x 7 poses)"}
         </button>
 
         <div
