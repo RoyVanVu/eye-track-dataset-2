@@ -1,4 +1,4 @@
-import { exp, math, mod } from "@tensorflow/tfjs";
+import { exp, math, mod, norm } from "@tensorflow/tfjs";
 
 export const TRIANGULATION = [
     127,
@@ -2745,6 +2745,31 @@ export const TRIANGULATION = [
     };
   };
 
+  // Calculate eyelid aperture (vertical distance between upper and lower eyelid)
+  export const getEyeApertures = (landmarks) => {
+    if (!landmarks || landmarks.length < 468) {
+      return null;
+    }
+
+    const L_UPPER = 159;  
+    const L_LOWER = 145;  
+    const R_UPPER = 386;  
+    const R_LOWER = 374;  
+
+    const leftAperture = Math.abs(landmarks[L_UPPER][1] - landmarks[L_LOWER][1]);
+    const rightAperture = Math.abs(landmarks[R_UPPER][1] - landmarks[R_LOWER][1]);
+
+    return {
+      left: leftAperture,
+      right: rightAperture
+    };
+  };
+
+  export const normalizeAperture = (aperture, eyeWidth) => {
+    if (!aperture || !eyeWidth || eyeWidth < 1) return 0;
+    return aperture / eyeWidth;
+  };
+
   export const irisToLocal = (eyeFrame, irisC) => {
     if (!eyeFrame || !irisC) return null;
     const { c, u_hat, v_hat, eyeWidth, eyeHeight } = eyeFrame;
@@ -3008,14 +3033,6 @@ export const TRIANGULATION = [
       iris: camToHeadPoint(eye3D_cam.iris, R_now, t_now)
     };
 
-    if (eyeSide === 'left') {
-      console.log(`[${eyeSide}] iris HEAD FRAME:`, {
-        x: eye3D_head.iris[0].toFixed(3),
-        y: eye3D_head.iris[1].toFixed(3),
-        z: eye3D_head.iris[2].toFixed(3)
-      });
-    }
-
     const iris2D_canonical = [eye3D_head.iris[0], eye3D_head.iris[1]];
     let offset;
     if (eyeCanon) {
@@ -3029,14 +3046,6 @@ export const TRIANGULATION = [
       };
       const eyeFrame = buildEyeLocalFrame(eye2D);
       offset = irisToLocal(eyeFrame, iris2D_canonical);
-    }
-
-    if (eyeSide === 'left') {
-      console.log(`[${eyeSide}] FINAL OFFSET:`, {
-        x: offset.x.toFixed(3),
-        y: offset.y.toFixed(3)
-      });
-      console.log('─────────────────────────');
     }
 
     return offset;
@@ -3301,99 +3310,119 @@ export const TRIANGULATION = [
     };
   }
 
-  function cross3(a, b) {
-    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
-  }
-  function dot3(a, b) {
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  }
-  function sub3(a, b) {
-    return [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-  }
-  function add3s(a, s, b) {
-    return [a[0] + s * b[0], a[1] + s * b[1], a[2] + s * b[2]];
-  }
+  export function buildHorizontalFeatures(zL, zR, headAngles=null, order=2, useHead=false) {
+    const base = [
+      zL.x,
+      zR.x,
+      (headAngles?.yaw || 0) / 30
+    ];
 
-  export function solveScreenPlaneLS(samples, cx, cy, ridge=1e-8) {
-    const N = samples.length;
-    const M = 9 + N;
-    const R = 3 * N;
-    const A = Array.from({ length: R }, () => Array(M).fill(0));
-    const b = Array(R).fill(0);
-    
-    for (let i = 0; i < N; i++) {
-      const { x, y, o, g } = samples[i];
-      const X = x - cx;
-      const Y = y - cy;
+    const feats = [...base, 1];
 
-      for (let k = 0; k < 3; k++) {
-        const r = 3 * i + k;
-        A[r][k] = 1;    
-        A[r][3 + k] = X;
-        A[r][6 + k] = Y;
-        A[r][9 + i] = -g[k];
-        b[r] = o[k];
-      } 
+    if (order >= 2) {
+      for (let i = 0; i < base.length; i++) {
+        feats.push(base[i] * base[i]);
+      }
+
+      for (let i = 0; i < base.length; i++) {
+        for (let j = i + 1; j < base.length; j++) {
+          feats.push(base[i] * base[j]);
+        }
+      }
     }
 
-    const AT = transpose(A);
-    const ATA = matMul(AT, A);
-    for (let d = 0; d < M; d++) ATA[d][d] += ridge;
-    const ATb = matVec(AT, b);
-    const s = gaussianSolve(ATA, ATb);
-
-    const O = [s[0], s[1], s[2]];
-    const U = [s[3], s[4], s[5]];
-    const V = [s[6], s[7], s[8]];
-    const t = s.slice(9);
-
-    let rss = 0;
-    for (let i = 0; i < N; i++) {
-      const { x, y, o, g } = samples[i];
-      const X = x - cx;
-      const Y = y - cy;
-      const p_plane = [ O[0] + U[0] * X + V[0] * Y,
-                        O[1] + U[1] * X + V[1] * Y,
-                        O[2] + U[2] * X + V[2] * Y ];
-      const p_ray = add3s(O, t[i], g);
-      const r = sub3(p_ray, p_plane);
-      rss += dot3(r, r);
-    }
-    return { O, U, V, t, cx, cy, rss };
+    return feats;
   }
 
-  export function intersectRayToScreenXY(o, g, plane) {
-    const { O, U, V, cx, cy } = plane;
-    const n = cross3(U, V);
-    const denom = dot3(g, n);
+  export function buildVerticalFeatures(zL, zR, headAngles=null, order=2, apertureL=null, apertureR=null) {
+    const normalize = (val, scale=1) => val / scale;
 
-    if (Math.abs(denom) < 1e-8) return null;
+    const base = [
+      normalize(zL.y, 0.5),
+      normalize(zR.y, 0.5),
+      normalize(headAngles?.pitch || 0, 30)
+    ];
 
-    const t = dot3(sub3(O, o), n) / denom;
-    const p = add3s(o, t, g);
-    const M = [[U[0], V[0]], [U[1], V[1]], [U[2], V[2]]];
-    const MT = transpose(M);
-    const MTM = matMul(MT, M);
-    const rhs = sub3(p, O);
-    const MTb = matVec(MT, rhs);
-    const [x0, y0] = gaussianSolve(MTM, MTb);
+    if (apertureL !== null && apertureR !== null) {
+      base.push(
+        normalize(apertureL, 0.3),   
+        normalize(apertureR, 0.3)     
+      );
+    }
 
-    return { x: x0 + cx, y: y0 + cy, p3: p, t };
+    let feats = [...base, 1];
+
+    if (order >= 2) {
+      for (let i = 0; i < base.length; i++) {
+        feats.push(base[i] * base[i]);
+      }
+
+      for (let i = 0; i < base.length; i++) {
+        for (let j = i + 1; j < base.length; j++) {
+          feats.push(base[i] * base[j]);
+        }
+      }
+    }
+
+    return feats;
   }
 
   export function buildGazeFeatureVec(zL, zR, headAngles=null, order=2, useHead=false) {
+    const normalize = (val, scale=1) => val / scale;
+
     const base = useHead
-      ? [zL.x, zL.y, zR.x, zR.y, (headAngles?.yaw || 0) / 30, (headAngles?.pitch || 0) / 30]
-      : [zL.x, zL.y, zR.x, zR.y];
+      ? [
+        normalize(zL.x, 0.5),
+        normalize(zL.y, 0.5),
+        normalize(zR.x, 0.5),
+        normalize(zR.y, 0.5),
+        normalize(headAngles?.yaw || 0, 30),
+        normalize(headAngles?.pitch || 0, 30)
+        ]
+      : [
+        normalize(zL.x, 0.5),
+        normalize(zL.y, 0.5),
+        normalize(zR.x, 0.5),
+        normalize(zR.y, 0.5),
+      ];
     
     let feats = [...base, 1];
 
     if (order >= 2) {
-      for (let i = 0; i < base.length; i++) feats.push(base[i] * base[i]);
-      for (let i = 0; i < base.length; i++)
-        for (let j = i + 1; j < base.length; j++) 
+      for (let i = 0; i < base.length; i++) { 
+        feats.push(base[i] * base[i]);
+      }
+      for (let i = 0; i < base.length; i++) {
+        for (let j = i + 1; j < base.length; j++) {
+          if ((i === 1 && j === 3)) continue;
           feats.push(base[i] * base[j]);
+        }
+      }
     }
+
+    if (order >= 3) {
+      for (let i = 0; i < base.length; i++) {
+        feats.push(base[i] * base[i] * base[i]);
+      }
+
+      for (let i = 0; i < base.length; i++) {
+        for (let j = i + 1; j < base.length; j++) {
+          feats.push(base[i] * base[i] * base[j]);
+          feats.push(base[i] * base[j] * base[j]);
+        }
+      }
+
+      if (base.length >= 4) {
+        feats.push(base[0] * base[1] * base[3]);
+        feats.push(base[2] * base[3] * base[1]);
+      }
+
+      if (useHead && base.length >= 6) {
+        feats.push(base[5] * base[1] * base[3]);
+        feats.push(base[4] * base[0] * base[2]);
+      }
+    }
+    
     return feats;
   }
 
@@ -3413,20 +3442,25 @@ export const TRIANGULATION = [
   }
 
   export function fitScreenXYModel(samples, order=2, ridge=1e-5, useHead=false) {
-    const X = samples.map(s => buildGazeFeatureVec(s.zL, s.zR, s.head, order, useHead));
+    const X_horizontal = samples.map(s => buildHorizontalFeatures(s.zL, s.zR, s.head, order));
+    const X_vertical = samples.map(s => buildVerticalFeatures(s.zL, s.zR, s.head, order, s.apertureL, s.apertureR));
+
     const yU = samples.map(s => s.u);
     const yV = samples.map(s => s.v);
-    const wU = fitLinearRidge(X, yU, ridge);
-    const wV = fitLinearRidge(X, yV, ridge);
-    return { order, wU, wV, useHead };
+
+    const wU = fitLinearRidge(X_horizontal, yU, ridge);
+    const wV = fitLinearRidge(X_vertical, yV, ridge);
+    return { order, wU, wV, useHead, separateFeatures: true };
   }
 
-  export function evalScreenXYModel(zL, zR, headAngles, model) {
-    const f = buildGazeFeatureVec(zL, zR, headAngles, model.order, model.useHead);
-    const u = dotVec(model.wU, f);
-    const v = dotVec(model.wV, f);
+  export function evalScreenXYModel(zL, zR, headAngles, model, apertureL=null, apertureR=null) {
+    const f_horizontal = buildHorizontalFeatures(zL, zR, headAngles);
+    const f_vertical = buildVerticalFeatures(zL, zR, headAngles, model.order, apertureL, apertureR);
+
+    const u = dotVec(model.wU, f_horizontal);
+    const v = dotVec(model.wV, f_vertical);
     return { 
-      u: Math.max(0, Math.min(1, u)),
-      v: Math.max(0, Math.min(1, v)),
+      u, v
     };
   }
+
