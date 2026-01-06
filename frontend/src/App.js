@@ -61,7 +61,7 @@ function App() {
   const xyCalibRef = useRef({ samples: [], model: null });
   const emaPogRef = useRef(makeEMA2(0.40));
   const eyeCanonRef = useRef({ left: null, right: null });
-  const headPoseNamesRef = useRef(['straight', 'left', 'right', 'up', 'down', 'tilt-left', 'tilt-right']);
+  const headPoseNamesRef = useRef(['straight', 'left', 'right', 'up', 'down']);
   const currentPoseIndexRef = useRef(0);
   const poseClickedDotsRef = useRef([]);
   const errorHistoryRef = useRef([]);
@@ -535,7 +535,7 @@ function App() {
       ec.clicked[hitIdx] = (ec.clicked[hitIdx] || 0) + 1;
 
       const headAngles = eulerFromR(RtRef.current.R_now);
-      console.log(`Pose ${currentPoseIndexRef.current + 1}/7 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
+      console.log(`Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
 
       setCalibVersions(v => v + 1);
 
@@ -985,7 +985,7 @@ function App() {
         }
       }
 
-      const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/63`;
+      const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/45`;
       octx.fillStyle = "rgba(0, 0, 0, 0.6)";
       octx.fillRect(10, 320, 140, 26);
       octx.fillStyle = "#fff";
@@ -1013,7 +1013,7 @@ function App() {
       octx.font = "bold 24px Arial";
       octx.textAlign = "center";
       octx.fillText(
-        `Pose ${currentPoseIndexRef.current + 1}/7 - Click ${poseClickedDotsRef.current.length}/9 dots`,
+        `Pose ${currentPoseIndexRef.current + 1}/5 - Click ${poseClickedDotsRef.current.length}/9 dots`,
         ocv.width / 2,
         90
       );
@@ -1544,7 +1544,7 @@ function App() {
             cursor: eyeCalibRef.current.active ? "default" : "pointer"
           }}
         >
-          {eyeCalibRef.current.active ? "Calibrating... Click center dot first!" : "Start Calibration (63 samples)"}
+          {eyeCalibRef.current.active ? "Calibrating... Click center dot first!" : "Start Calibration (45 samples)"}
         </button>
 
         <div
