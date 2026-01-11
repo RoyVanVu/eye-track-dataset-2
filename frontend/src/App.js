@@ -67,6 +67,9 @@ function App() {
   const errorHistoryRef = useRef([]);
   const baselineSetRef = useRef(false);
   const detectorRef = useRef(null);
+  const isTestingRef = useRef(false);
+  const testPointIndexRef = useRef(-1);
+  const latestPogRef = useRef({ x: 0, y: 0 });
 
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
@@ -96,6 +99,15 @@ function App() {
     rightNorm: null
   });
 
+  const [isTesting, setIsTesting] = useState(false);
+  const [testPointIndex, setTestPointIndex] = useState(-1);
+  const testResultsRef = useRef([]);
+  const [testSummary, setTestSummary] = useState(null);
+
+  useEffect(() => {
+    isTestingRef.current = isTesting;
+    testPointIndexRef.current = testPointIndex;
+  }, [isTesting, testPointIndex]);
 
   useEffect(() => {
     console.log('╔════════════════════════════════════════╗');
@@ -240,6 +252,65 @@ function App() {
     const z = Math.max(1e-6, p[2]);
     return [cx + fx * (p[0] / z), cy - fy * (p[1] / z)];
   }
+
+  const runAccuracyTest = async () => {
+    setIsTesting(true);
+    setTestSummary(null);
+    testResultsRef.current = [];
+    const points = buildGrid();
+
+    const canvasW = overlayRef.current.width;
+    const canvasH = overlayRef.current.height;
+
+    for (let i = 0; i < points.length; i++) {
+      setTestPointIndex(i);
+      await new Promise(res => setTimeout(res, 5000));
+
+      if (pogTraceInfo.final) {
+        const targetX = points[i].u * canvasW;
+        const targetY = points[i].v * canvasH;
+        const predX = latestPogRef.current.x;
+        const predY = latestPogRef.current.y;
+
+        const dist = Math.sqrt(Math.pow(targetX - predX, 2) + Math.pow(targetY - predY, 2));
+
+        testResultsRef.current.push({
+          u: points[i].u,
+          v: points[i].v,
+          error: dist,
+          target: {
+            x: targetX,
+            y: targetY
+          },
+          predicted: {
+            x: predX,
+            y: predY
+          }
+        });
+      }
+    }
+
+    calculateFinalScore();
+    setIsTesting(false);
+    setTestPointIndex(-1);
+  };
+
+  const calculateFinalScore = () => {
+    const results = testResultsRef.current;   
+    if (results.length === 0) return;
+
+    const avgError = results.reduce((sum, item) => sum + item.error, 0) / results.length;
+
+    const screenMin = Math.min(overlayRef.current.width, overlayRef.current.height);
+    const pctError = ((avgError / screenMin) * 100).toFixed(2);
+
+    setTestSummary({
+      avgPixelError: avgError.toFixed(1),
+      maxError: Math.max(...results.map(r => r.error)).toFixed(1),
+      percentageError: pctError,
+      points: results
+    });
+  };
 
   useEffect(() => {
     let intervalId = null;
@@ -455,6 +526,11 @@ function App() {
             t0,
             eyeCanonRef.current
           );
+
+          if (!norm0) {
+            alert("Iris not detected! Please ensure your eyes are visible and look at the camera.");
+            return;
+          }
 
           if (norm0) {
             gazeOffsetRef.current = {
@@ -825,6 +901,8 @@ function App() {
           const xpix = u * ocv.width;
           const ypix = v * ocv.height;
 
+          latestPogRef.current = { x: xpix, y: ypix };
+
           const debugFeatsV = buildVerticalFeatures(zL, zR, headAnglesNow, xyCalibRef.current.model.order, apertureL_norm, apertureR_norm);
           const debugFeatsU = buildHorizontalFeatures(zL, zR, headAnglesNow, xyCalibRef.current.model.order);
           
@@ -902,31 +980,33 @@ function App() {
           octx.strokeStyle = "white";
           octx.stroke();
 
-          octx.beginPath();
-          octx.arc(mousePos.x, mousePos.y, 10, 0, Math.PI * 2);
-          octx.fillStyle = "rgba(0, 255, 0, 0.8)";
-          octx.fill();
-          octx.lineWidth = 2;
-          octx.strokeStyle = "yellow";
-          octx.stroke();
+          if (isTestingRef.current && testPointIndexRef.current !== -1) {
+            const points = buildGrid();
+            const targetU = points[testPointIndexRef.current].u;
+            const targetV = points[testPointIndexRef.current].v;
 
-          octx.beginPath();
-          octx.moveTo(mousePos.x, mousePos.y);
-          octx.lineTo(xpix, ypix);
-          octx.strokeStyle = "rgba(255, 255, 0, 0.6)";
-          octx.lineWidth = 2;
-          octx.setLineDash([5, 5]);
-          octx.stroke();
-          octx.setLineDash([])
+            const targetX = targetU * ocv.width;
+            const targetY = targetV * ocv.height;
 
-          octx.fillStyle = "rgba(0, 0, 0, 0.7)";
-          octx.fillRect(mousePos.x + 15, mousePos.y - 25, 140, 50);
-          octx.fillStyle = "#00FF00";
-          octx.font = "bold 14px Arial";
-          octx.fillText(`Mouse: (${mousePos.x.toFixed(0)}, ${mousePos.y.toFixed(0)})`, mousePos.x + 20, mousePos.y - 10);
-          octx.fillStyle = "white";
-          octx.font = "12px Arial";
-          octx.fillText(`Distance: ${distance.toFixed(0)} px`, mousePos.x + 20, mousePos.y + 5);
+            octx.beginPath();
+            octx.moveTo(targetX, targetY);
+            octx.lineTo(xpix, ypix);
+            octx.strokeStyle = "rgba(0, 255, 0, 0.6)";
+            octx.lineWidth = 2;
+            octx.setLineDash([5, 5]);
+            octx.stroke();
+            octx.setLineDash([]);
+
+            const dx = targetX - xpix;
+            const dy = targetY - ypix;
+            const liveDist = Math.sqrt(dx * dx + dy * dy);
+
+            octx.fillStyle = "rgba(0, 0, 0, 0.7)";
+            octx.fillRect(targetX + 20, targetY - 20, 120, 30);
+            octx.fillStyle = "#00FF00";
+            octx.font = "bold 14px Arial";
+            octx.fillText(`Error: ${liveDist.toFixed(0)} px`, targetX + 25, targetY);       
+          }
         } 
       }
 
@@ -1638,6 +1718,115 @@ function App() {
         >
           🔍 Show Model Weights
         </button>
+        <button
+          onClick={runAccuracyTest}
+          disabled={!isCalibrated || isTesting}
+          style={{
+            position: "absolute",
+            top: 280,
+            left: 20,
+            zIndex: 10,
+            padding: "10px 20px",
+            backgroundColor: (!isCalibrated || isTesting) ? "gray" : "#E91E63",
+            color: "white",
+            border: "none",
+            borderRadius: "5px",
+            cursor: "pointer"
+          }}
+        >
+          {isTesting ? "Testing..." : "Run Accuracy Test"}
+        </button>
+
+        {isTesting && testPointIndex !== -1 && (
+          <div style={{
+            position: 'fixed',
+            left: `${buildGrid()[testPointIndex].u * 100}%`,
+            top: `${buildGrid()[testPointIndex].v * 100}%`,
+            width: '30px',
+            height: '30px',
+            backgroundColor: '#00FF00',
+            borderRadius: '50%',
+            border: '4px solid white',
+            transform: 'translate(-50%, -50%)',
+            zIndex: 100,
+            boxShadow: '0 0 20px #00FF00'
+          }} />
+        )}
+
+        {testSummary && testSummary.points && (
+          <div style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0,0,0,0.92)', 
+            zIndex: 100,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontFamily: 'Arial, sans-serif'
+          }}>
+            <div style={{ textAlign: 'center', marginBottom: '20px' }}>
+                <h2 style={{ color: '#FF9800', margin: '0 0 10px 0' }}>Gaze Accuracy Results</h2>
+                <div style={{ display: 'flex', gap: '20px', justifyContent: 'center' }}>
+                    <p style={{ color: '#ccc' }}>Avg Error: <span style={{color: '#00FF00', fontSize: '20px', fontWeight: 'bold'}}>{testSummary.avgPixelError}px</span></p>
+                    <p style={{ color: '#ccc' }}>Screen Error: <span style={{color: '#00FF00', fontSize: '20px', fontWeight: 'bold'}}>{testSummary.percentageError}%</span></p>
+                </div>
+            </div>
+
+            {/* The Heatmap Visualizer Box */}
+            <div style={{
+              position: 'relative',
+              width: '85vw',
+              height: '65vh',
+              background: '#000',
+              border: '2px solid #E91E63', 
+              borderRadius: '12px',
+              boxShadow: '0 0 30px rgba(233, 30, 99, 0.2)'
+            }}>
+              {testSummary.points.map((pt, idx) => {
+                const intensity = Math.min(1, pt.error / 150); 
+                const color = `rgb(${intensity * 255}, ${255 - intensity * 255}, 0)`;
+                
+                return (
+                  <div key={idx} style={{
+                    position: 'absolute',
+                    left: `${pt.u * 100}%`,
+                    top: `${pt.v * 100}%`,
+                    transform: 'translate(-50%, -50%)',
+                  }}>
+                    <div style={{
+                      width: '40px',
+                      height: '40px',
+                      backgroundColor: color,
+                      borderRadius: '50%',
+                      opacity: 0.8,
+                      boxShadow: `0 0 15px ${color}`,
+                    }} />
+                    <span style={{ fontSize: '11px', color: '#fff', display: 'block', textAlign: 'center', marginTop: '5px' }}>
+                      {pt.error.toFixed(0)}px
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button 
+              onClick={() => setTestSummary(null)}
+              style={{
+                marginTop: '30px',
+                padding: '12px 40px',
+                backgroundColor: '#E91E63', 
+                color: 'white',
+                border: 'none',
+                borderRadius: '8px',
+                cursor: 'pointer',
+                fontWeight: 'bold'
+              }}
+            >
+              Done
+            </button>
+          </div>
+        )}
         {/* {renderIrisDebugPanel()}
         {renderApertureDebugPanel()}  */}
         {renderPoGTracePanel()}

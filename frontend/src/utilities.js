@@ -3002,27 +3002,35 @@ export const TRIANGULATION = [
   }
 
   function getEyeLandmarks3D(landmarks, eyeSide) {
+    const safeV3 = (idx) => landmarks[idx] ? v3(landmarks[idx]) : [0, 0, 0];
+
     if (eyeSide === 'left') {
       return {
-        inner: v3(landmarks[133]), // L_INNER
-        outer: v3(landmarks[33]), // L_OUTER
-        up: v3(landmarks[159]), // L_UPMID
-        down: v3(landmarks[145]), // L_LOMID
-        iris: v3(landmarks[IRIS_LEFT_CENTER])
+        inner: safeV3(133), // L_INNER
+        outer: safeV3(33), // L_OUTER
+        up: safeV3(159), // L_UPMID
+        down: safeV3(145), // L_LOMID
+        iris: safeV3(IRIS_LEFT_CENTER)
       };
     } else {
       return {
-        inner: v3(landmarks[362]), // R_INNER
-        outer: v3(landmarks[263]), // R_OUTER
-        up: v3(landmarks[386]), // R_UPMID
-        down: v3(landmarks[374]), // R_LOMID
-        iris: v3(landmarks[IRIS_RIGHT_CENTER])
+        inner: safeV3(362), // R_INNER
+        outer: safeV3(263), // R_OUTER
+        up: safeV3(386), // R_UPMID
+        down: safeV3(374), // R_LOMID
+        iris: safeV3(IRIS_RIGHT_CENTER)
       };
     }
   }
 
   export function getRectifiedIrisOffset(landmarks, R_now, t_now, eyeSide, eyeCanon) {
     if (!landmarks || !R_now) return null;
+
+    const requiredIndex = eyeSide === 'left' ? IRIS_LEFT_CENTER : IRIS_RIGHT_CENTER;
+    if (!landmarks[requiredIndex]) {
+      console.warn(`Iris landmarks ${requiredIndex} missing. Ensure refineLanmarks is true`);
+      return null;
+    }
 
     const eye3D_cam = getEyeLandmarks3D(landmarks, eyeSide);
     const eye3D_head = {
