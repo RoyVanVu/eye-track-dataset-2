@@ -864,8 +864,8 @@ function App() {
         octx.clearRect(0, 0, ocv.width, ocv.height);
 
         const okAperture =
-          leftEyeFrame.eyeHeight  > 0.25 * leftEyeFrame.eyeWidth &&
-          rightEyeFrame.eyeHeight > 0.25 * rightEyeFrame.eyeWidth;
+          leftEyeFrame.eyeHeight  > 0.15 * leftEyeFrame.eyeWidth &&
+          rightEyeFrame.eyeHeight > 0.15 * rightEyeFrame.eyeWidth;
 
         if (!eyeCalibRef.current.active &&
             xyCalibRef.current.model &&
@@ -1543,7 +1543,7 @@ function App() {
             textAlign:"center",
             zIndex:9,
             width:640,
-            height:480
+            height:480,
           }}
         />
 
@@ -1558,7 +1558,7 @@ function App() {
             textAlign:"center",
             zIndex:9,
             width:640,
-            height:480
+            height:480,
           }}
         />
 
