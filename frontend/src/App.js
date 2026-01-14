@@ -1532,35 +1532,45 @@ function App() {
   return (
     <div className="App">
       <header className="App-header">
-        <Webcam
-          ref={webcamRef}
-          style={{
-            position:"absolute",
-            marginLeft:"auto",
-            marginRight:"auto",
-            left:0,
-            right:0,
-            textAlign:"center",
-            zIndex:9,
-            width:640,
-            height:480,
-          }}
-        />
+        <div style={{
+          position: "absolute",
+          marginLeft: "auto",
+          marginRight: "auto",
+          left: "0",
+          right: "0",
+          textAlign: "center",
+          zIndex: 9,
+          width: 640,
+          height: 480,
+          overflow: "hidden",
+          borderRadius: "10px",
+          border: "2px solid #333",
+        }}>
+          <Webcam
+            ref={webcamRef}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform: "scale(2.0)",
+              transformOrigin: "center",
+            }}
+          />
 
-        <canvas 
-          ref={canvasRef}
-          style={{
-            position:"absolute",
-            marginLeft:"auto",
-            marginRight:"auto",
-            left:0,
-            right:0,
-            textAlign:"center",
-            zIndex:9,
-            width:640,
-            height:480,
-          }}
-        />
+          <canvas 
+            ref={canvasRef}
+            style={{
+              position:"absolute",
+              left:0,
+              right:0,
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform: "scale(2.0)",
+              transformOrigin: "center"
+            }}
+          />
+        </div>
 
         <canvas 
           ref={overlayRef}
