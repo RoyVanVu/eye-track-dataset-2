@@ -1,4 +1,4 @@
-import React, {useRef, useState, useEffect} from 'react';
+import React, {useRef, useState, useEffect, useReducer} from 'react';
 import * as tf from "@tensorflow/tfjs";
 import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection'
@@ -23,6 +23,9 @@ import { drawMesh, displayPoseInfo,
          buildHorizontalFeatures,
          getEyeApertures,
          normalizeAperture,
+         getLissajousCoords,
+         isBlinking,
+         createGazeModel,
  } from './utilities';
 
 function App() {
@@ -71,6 +74,21 @@ function App() {
   const testPointIndexRef = useRef(-1);
   const latestPogRef = useRef({ x: 0, y: 0 });
 
+  const calibStageRef = useRef('idle');
+  const trainingDataRef = useRef([]);
+  const targetQueueRef = useRef([]);
+  const baselineSamplesRef = useRef([]);
+  const calibStartTimeRef = useRef(null);
+  const nnModelRef = useRef(null);
+  const calibDotRef = useRef({ u: 0.5, v: 0.5 });
+
+  const featureNormRef = useRef({
+    irisScale: 0.5,
+    headYawScale: 30,
+    headPitchScale: 30,
+    apertureScale: 0.3
+  });
+
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
   const [calibVersion, setCalibVersions] = useState(0);
@@ -104,10 +122,18 @@ function App() {
   const testResultsRef = useRef([]);
   const [testSummary, setTestSummary] = useState(null);
 
+  const [calibStage, setCalibStage] = useState('idle');
+  const [calibDot, setCalibDot] = useState({ u: 0.5, v: 0.5 });
+  const [calibInstruction, setCalibInstruction] = useState("");
+
   useEffect(() => {
     isTestingRef.current = isTesting;
     testPointIndexRef.current = testPointIndex;
   }, [isTesting, testPointIndex]);
+
+  useEffect(() => {
+    calibStageRef.current = calibStage;
+  }, [calibStage]);
 
   useEffect(() => {
     console.log('╔════════════════════════════════════════╗');
@@ -190,24 +216,16 @@ function App() {
   };
 
   const startEyeCalibration = async () => {
+    trainingDataRef.current = [];
+    targetQueueRef.current = [];
+    baselineSamplesRef.current = [];
     baselineSetRef.current = false;
     headTemplateRef.current = null;
+
     gazeOffsetRef.current = {
       left: { x: 0, y: 0 },
       right: { x: 0, y: 0 }
     };
-
-    eyeCalibRef.current.active = true;
-    eyeCalibRef.current.normPoints = buildGrid();
-    eyeCalibRef.current.clicked = [];
-    currentPoseIndexRef.current = 0;
-    poseClickedDotsRef.current = [];
-
-    // screenCalibRef.current.samples = [];
-    // screenCalibRef.current.solved = null;
-
-    xyCalibRef.current.samples = [];
-    xyCalibRef.current.model = null;
 
     if (!detectorRef.current && webcamRef.current?.video.readyState === 4) {
       try {
@@ -232,13 +250,56 @@ function App() {
       }
     }
 
-    console.log("Calibration started - Click CENTER dot first!");
+    eyeCalibRef.current.active = true;
+    setCalibStage('anchor');
+    calibDotRef.current = { u: 0.5, v: 0.5 };
+    setCalibDot({ u: 0.5, v: 0.5 });
+    setCalibInstruction("Look at the CENTER dot and CLICK when ready");
     setCalibVersions(v => v + 1);
+
+    console.log("Calibration started - Click CENTER dot first!");
   };
 
-  const stopEyeCalibration = () => {
+  const stopEyeCalibration = async () => {
+    setCalibStage('idle');
+    calibStageRef.current = 'idle';
+    setCalibInstruction("Training Neural Network... Please wait.");
+
+    const data = trainingDataRef.current;
+    if (data.length < 100) {
+      alert("Not enough data collected! Please follow the dot more closely.");
+      eyeCalibRef.current.active = false;
+      return;
+    }
+
+    const model = createGazeModel();
+    const xs = tf.tensor2d(data.map(d => d.x));
+    const ys = tf.tensor2d(data.map(d => d.y));
+
+    console.log(`Training on ${data.length} samples...`);
+    await model.fit(xs, ys, {
+      epochs: 50,
+      batchSize: 32,
+      shuffle: true,
+      validationSplit: 0.1,
+      callbacks: {
+        onEpochEnd: (epoch, logs) => {
+          setCalibInstruction(`Training... Epoch ${epoch + 1}/50 (loss: ${logs.loss.toFixed(4)})`);
+          if (epoch % 10 === 0) {
+            console.log(`Epoch ${epoch}: loss=${logs.loss.toFixed(4)}, val_loss=${logs.val_loss.toFixed(4)}`);
+          }
+        }
+      }
+    });
+
+    nnModelRef.current = model;
+    xs.dispose();
+    ys.dispose();
+
     eyeCalibRef.current.active = false;
-    setCalibVersions(v => v + 1);
+    setIsCalibrated(true);
+    setCalibInstruction("");
+    console.log("Neural Network Bridge Built Successfully!");
   };
 
   const transformRT = (R, t, p) => ([
@@ -366,273 +427,21 @@ function App() {
     window.addEventListener("resize", setSize);
 
     const handleClick = (e) => {
-      const ec = eyeCalibRef.current;
-      if (!ec.active || !lastNormRef.current) return;
-
-      const rect = ocv.getBoundingClientRect()
-      const x = (e.clientX - rect.left) * (ocv.width / rect.width);
-      const y = (e.clientY - rect.top) * (ocv.height / rect.height);
-
-      const radius = Math.max(18, Math.min(28, 0.02 * Math.min(ocv.width, ocv.height)));
-      let hitIdx = -1;
-      let minD2 = Infinity;
-
-      for (let i = 0; i < ec.normPoints.length; i++) {
-        if (poseClickedDotsRef.current.includes(i)) continue;
-        const px = ec.normPoints[i].u * ocv.width;
-        const py = ec.normPoints[i].v * ocv.height;
-        const d2 = (x - px) * (x - px) + (y - py) * (y - py);
-        if (d2 < radius * radius && d2 < minD2) {
-          minD2 = d2;
-          hitIdx = i;
-        }
+      if (!eyeCalibRef.current.active) return;
+      if (!lastNormRef.current?.landmarks) {
+        alert("No face detected! Please ensure your face is visible.");
+        return;
       }
 
-      if (hitIdx === -1) return;
+      const currentStage = calibStageRef.current;
 
-      const isFirstPose = currentPoseIndexRef.current == 0;
-      const isCenterDot = hitIdx === 4;
+      if (currentStage === 'anchor') {
+        headTemplateRef.current = pickPoint3D(lastNormRef.current.landmarks);
 
-      if (isFirstPose && !baselineSetRef.current) {
-        if (!isCenterDot) {
-          alert("Please click the CENTER dot first to set your baseline!");
-          return;
-        }
-
-        try {
-          if (!lastNormRef.current.landmarks) {
-            alert("No face data available! PLease ensure your face is visible.");
-            return;
-          }
-
-          const landmarks = lastNormRef.current.landmarks;
-
-          headTemplateRef.current = pickPoint3D(landmarks);
-          const obsPts = pickPoint3D(landmarks);
-          const Rt_now = estimateRtHorn(headTemplateRef.current, obsPts);
-
-          if (!Rt_now) {
-            alert("Failed to estimate head pose!");
-            return;
-          }
-
-          RtRef.current = Rt_now;
-          console.log("Head template saved (straight pose)");
-
-          const centers = getIrisCenters(landmarks);
-          if (centers) {
-            const tip = landmarks[1];
-            const br = landmarks[6];
-            const fwd = (() => {
-              const vx = tip[0] - br[0];
-              const vy = tip[1] - br[1];
-              const vz = tip[2] - br[2];
-              const n = Math.hypot(vx, vy, vz) || 1;
-              
-              return [
-                vx / n,
-                vy / n,
-                vz / n
-              ];
-            })();
-
-            const pdUnits = Math.hypot(
-              centers.left[0] - centers.right[0],
-              centers.left[1] - centers.right[1],
-              (centers.left[2] ?? 0) - (centers.right[2] ?? 0)
-            );
-
-            const EYE_RADIUS_MM = 12;
-            const PD_MM = 63;
-            const rUnits = pdUnits * (EYE_RADIUS_MM / PD_MM);
-
-            eyeOriginsHeadRef.current = {
-              left: [
-                centers.left[0] - fwd[0] * rUnits,
-                centers.left[1] - fwd[1] * rUnits,
-                centers.left[2] - fwd[2] * rUnits,
-              ],
-              right: [
-                centers.right[0] - fwd[0] * rUnits,
-                centers.right[1] - fwd[1] * rUnits,
-                centers.right[2] - fwd[2] * rUnits,
-              ]
-            };
-            console.log("Eye origins saved");
-          }
-
-          const R0 = Rt_now.R_now;
-          const t0 = Rt_now.t_now;
-          const Lc = {
-            inner: landmarks[133],
-            outer: landmarks[33],
-            up: landmarks[159],
-            down: landmarks[145]
-          };
-          const Rc = {
-            inner: landmarks[362],
-            outer: landmarks[263],
-            up: landmarks[386],
-            down: landmarks[374]
-          };
-
-          const toHead = (p) => {
-            const Rinv = [
-              [R0[0][0], R0[1][0], R0[2][0]],
-              [R0[0][1], R0[1][1], R0[2][1]],
-              [R0[0][2], R0[1][2], R0[2][2]]
-            ];
-            const q = [p[0] - t0[0], p[1] - t0[1], p[2] - t0[2]];
-            return [
-              Rinv[0][0] * q[0] + Rinv[0][1] * q[1] + Rinv[0][2] * q[2],
-              Rinv[1][0] * q[0] + Rinv[1][1] * q[1] + Rinv[1][2] * q[2],
-              Rinv[2][0] * q[0] + Rinv[2][1] * q[1] + Rinv[2][2] * q[2],
-            ];
-          };
-
-          const Lh = {
-            inner: toHead(Lc.inner),
-            outer: toHead(Lc.outer),
-            up: toHead(Lc.up),
-            down: toHead(Lc.down)
-          };
-          const Rh = {
-            inner: toHead(Rc.inner),
-            outer: toHead(Rc.outer),
-            up: toHead(Rc.up),
-            down: toHead(Rc.down)
-          };
-
-          const mkCanon = (E) => {
-            const eye2D = {
-              inner: [E.inner[0], E.inner[1]],
-              outer: [E.outer[0], E.outer[1]],
-              up: [E.up[0], E.up[1]],
-              down: [E.down[0], E.down[1]],
-            };
-
-            return buildEyeLocalFrame(eye2D);
-          };
-
-          eyeCanonRef.current = {
-            left: mkCanon(Lh),
-            right: mkCanon(Rh)
-          };
-          console.log("Canonical eye frames saved");
-
-          const norm0 = getRectifiedIrisOffsets(
-            landmarks,
-            R0,
-            t0,
-            eyeCanonRef.current
-          );
-
-          if (!norm0) {
-            alert("Iris not detected! Please ensure your eyes are visible and look at the camera.");
-            return;
-          }
-
-          if (norm0) {
-            gazeOffsetRef.current = {
-              left: { ...norm0.left },
-              right: { ...norm0.right },
-            };
-            baselineSetRef.current = true;
-            setIsCalibrated(true);
-            console.log("Iris baseline saved:", gazeOffsetRef.current);
-            console.log("ALL BASELINE DATA SAVED - Continue calibration!");
-
-            return;
-          } else {
-            alert("Failed to compute iris baseline!");
-            return;
-          }
-        } catch (e) {
-          console.error("Baseline setup failed:", e);
-          alert("Setup failed! Please try again.");
-          return;
-        }
-      }
-
-      const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
-      const headAnglesNow = (RtRef.current?.R_now)
-        ? eulerFromR(RtRef.current.R_now)
-        : { yaw: 0, pitch: 0 };
-
-      const smL = emaLeftRef.current(lastNormRef.current.left);
-      const smR = emaRightRef.current(lastNormRef.current.right);
-
-      const zeroL = {
-        x: smL.x - gazeOffsetRef.current.left.x,
-        y: smL.y - gazeOffsetRef.current.left.y
-      };
-      const zeroR = {
-        x: smR.x - gazeOffsetRef.current.right.x,
-        y: smR.y - gazeOffsetRef.current.right.y
-      }
-
-      const zL = zeroL;
-      const zR = zeroR;
-
-      const apertures = getEyeApertures(lastNormRef.current.landmarks);
-      const leftFrame = getEyeLocalFrames(lastNormRef.current.landmarks).left;
-      const rightFrame = getEyeLocalFrames(lastNormRef.current.landmarks).right;
-
-      const apertureL_norm = apertures ? normalizeAperture(apertures.left, leftFrame.eyeWidth) : null;
-      const apertureR_norm = apertures ? normalizeAperture(apertures.right, rightFrame.eyeWidth) : null;
-
-      const u = x / ocv.width;
-      const v = y / ocv.height;
-
-      xyCalibRef.current.samples.push({
-        u, v, 
-        zL, zR,
-        head: headAnglesNow,
-        apertureL: apertureL_norm,
-        apertureR: apertureR_norm
-      });
-
-      if (xyCalibRef.current.samples.length >= 6) {
-        const ridge = eyeCalibRef.current.order === 3 ? 0.5 :
-                      eyeCalibRef.current.order === 2 ? 0.5 : 1e-3;
-        xyCalibRef.current.model = fitScreenXYModel(
-          xyCalibRef.current.samples, 
-          eyeCalibRef.current.order,
-          ridge, 
-          true
-        );
-      } 
-
-      const { yaw, pitch } = labelForIndex(hitIdx);
-      addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
-      addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
-
-      poseClickedDotsRef.current.push(hitIdx);
-      ec.clicked[hitIdx] = (ec.clicked[hitIdx] || 0) + 1;
-
-      const headAngles = eulerFromR(RtRef.current.R_now);
-      console.log(`Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
-
-      setCalibVersions(v => v + 1);
-
-      if (poseClickedDotsRef.current.length === 9) {
-        console.log(`Completed pose ${currentPoseIndexRef.current + 1}/7 (${poseName})`);
-
-        currentPoseIndexRef.current++;
-        poseClickedDotsRef.current = [];
-
-        setCalibVersions(v => v + 1);
-      }
-
-      const allDone = currentPoseIndexRef.current >= headPoseNamesRef.current.length;
-
-      if (allDone) {
-        console.log(`All ${xyCalibRef.current.samples.length} samples collected (${headPoseNamesRef.current.length} pose x 9 dots)`);
-        fitCalib('left', ec.order);
-        fitCalib('right', ec.order);
-
-        setCalibVersions(v => v + 1);
-        stopEyeCalibration();
+        setCalibInstruction("Hold still... capturing baseline...");
+        setCalibStage('capturing-baseline');
+        baselineSamplesRef.current = [];
+        console.log("Anchor clicked - starting baseline capture...");
       }
     };
 
@@ -643,7 +452,119 @@ function App() {
     };
   }, [isCalibrated]);
 
+  const finalizeBaseline = (lastLandmarks, lastR, lastT) => {
+    const samples = baselineSamplesRef.current;
+    if (samples.length === 0) return;
+
+    const avgLeft = {
+      x: samples.reduce((sum, s) => sum + s.left.x, 0) / samples.length,
+      y: samples.reduce((sum, s) => sum + s.left.y, 0) / samples.length
+    };
+    const avgRight = {
+      x: samples.reduce((sum, s) => sum + s.right.x, 0) / samples.length,
+      y: samples.reduce((sum, s) => sum + s.right.y, 0) / samples.length
+    };
+
+    gazeOffsetRef.current = { left: avgLeft, right: avgRight };
+
+    headTemplateRef.current = pickPoint3D(lastLandmarks);
+    RtRef.current = { R_now: lastR, t_now: lastT };
+
+    const centers = getIrisCenters(lastLandmarks);
+    if (centers) {
+      const tip = lastLandmarks[1];
+      const br = lastLandmarks[6];
+      const fwd = (() => {
+        const vx = tip[0] - br[0];
+        const vy = tip[1] - br[1];
+        const vz = tip[2] - br[2];
+        const n = Math.hypot(vx, vy, vz) || 1;
+        return [vx / n, vy / n, vz / n];
+      })();
+
+      const pdUnits = Math.hypot(
+        centers.left[0] - centers.right[0],
+        centers.left[1] - centers.right[1],
+        (centers.left[2] ?? 0) - (centers.right[2] ?? 0)
+      );
+
+      const EYE_RADIUS_MM = 12;
+      const PD_MM = 63;
+      const rUnits = pdUnits * (EYE_RADIUS_MM / PD_MM);
+
+      eyeOriginsHeadRef.current = {
+        left: [
+          centers.left[0] - fwd[0] * rUnits,
+          centers.left[1] - fwd[1] * rUnits,
+          centers.left[2] - fwd[2] * rUnits,
+        ],
+        right: [
+          centers.right[0] - fwd[0] * rUnits,
+          centers.right[1] - fwd[1] * rUnits,
+          centers.right[2] - fwd[2] * rUnits,
+        ]
+      };
+    }
+
+    const toHead = (p) => {
+      const Rinv = [
+        [lastR[0][0], lastR[1][0], lastR[2][0]],
+        [lastR[0][1], lastR[1][1], lastR[2][1]],
+        [lastR[0][2], lastR[1][2], lastR[2][2]]
+      ];
+      const q = [p[0] - lastT[0], p[1] - lastT[1], p[2] - lastT[2]];
+      return [
+        Rinv[0][0] * q[0] + Rinv[0][1] * q[1] + Rinv[0][2] * q[2],
+        Rinv[1][0] * q[0] + Rinv[1][1] * q[1] + Rinv[1][2] * q[2],
+        Rinv[2][0] * q[0] + Rinv[2][1] * q[1] + Rinv[2][2] * q[2],
+      ];
+    };
+
+    const Lc = { 
+      inner: lastLandmarks[133], 
+      outer: lastLandmarks[33],
+      up: lastLandmarks[159],
+      down: lastLandmarks[145]
+    };
+    const Rc = {
+      inner: lastLandmarks[362],
+      outer: lastLandmarks[263],
+      up: lastLandmarks[386],
+      down: lastLandmarks[374]
+    };
+
+    const Lh = {
+      inner: toHead(Lc.inner),
+      outer: toHead(Lc.outer),
+      up: toHead(Lc.up),
+      down: toHead(Lc.down)
+    };
+    const Rh = {
+      inner: toHead(Rc.inner),
+      outer: toHead(Rc.outer),
+      up: toHead(Rc.up),
+      down: toHead(Rc.down)
+    };
+
+    const mkCanon = (E) => {
+      const eye2D = {
+        inner: [E.inner[0], E.inner[1]],
+        outer: [E.outer[0], E.outer[1]],
+        up: [E.up[0], E.up[1]],
+        down: [E.down[0], E.down[1]],
+      };
+      return buildEyeLocalFrame(eye2D);
+    };
+
+    eyeCanonRef.current = { left: mkCanon(Lh), right: mkCanon(Rh) };
+
+    baselineSetRef.current = true;
+    console.log("Baseline Anchored:", gazeOffsetRef.current);
+  };
+
   const detect = async (net) => {
+    if (!webcamRef.current || !canvasRef.current || !overlayRef.current) return;
+
     if (
       typeof webcamRef.current === "undefined" ||
       webcamRef.current === null ||
@@ -712,6 +633,75 @@ function App() {
       if (norm) {
         lastNormRef.current.left = { ...norm.left };
         lastNormRef.current.right = { ...norm.right};
+      }
+    }
+
+    const currentStage = calibStageRef.current;
+
+    if (eyeCalibRef.current.active && norm) {
+      if (currentStage === 'capturing-baseline') {
+        baselineSamplesRef.current.push({
+          left: { ...norm.left },
+          right: { ...norm.right }
+        });
+
+        if (baselineSamplesRef.current.length >= 15) {
+          finalizeBaseline(landmarks, RtRef.current.R_now, RtRef.current.t_now);
+          setCalibStage('pursuit');
+          calibStartTimeRef.current = Date.now();
+        }
+      }
+
+      if (currentStage === 'pursuit') {
+        const elapsed = (Date.now() - calibStartTimeRef.current) / 1000;
+
+        if (elapsed >= 30) {
+          stopEyeCalibration();
+        } else {
+          if (elapsed < 7) setCalibInstruction("Phase 1: Keep head STILL");
+          else if (elapsed < 14) setCalibInstruction("Phase 2: Gently TILT head");
+          else setCalibInstruction("Phase 3: Gently NOD head");
+
+          const currentTarget = getLissajousCoords(elapsed);
+          calibDotRef.current = currentTarget;
+          setCalibDot(currentTarget);
+
+          const apertures = getEyeApertures(landmarks);
+          const leftFrame = getEyeLocalFrames(landmarks).left;
+          const rightFrame = getEyeLocalFrames(landmarks).right;
+          const aL = normalizeAperture(apertures?.left, leftFrame.eyeWidth);
+          const aR = normalizeAperture(apertures?.right, rightFrame.eyeWidth);
+
+          if (!isBlinking(aL, aR)) {
+            targetQueueRef.current.push(currentTarget);
+            if (targetQueueRef.current.length > 2) {
+              const delayedTarget = targetQueueRef.current.shift();
+              const scales = featureNormRef.current;
+              const head = eulerFromR(RtRef.current.R_now);
+
+              const zeroL = {
+                x: norm.left.x - gazeOffsetRef.current.left.x,
+                y: norm.left.y - gazeOffsetRef.current.left.y
+              };
+              const zeroR = {
+                x: norm.right.x - gazeOffsetRef.current.right.x,
+                y: norm.right.y - gazeOffsetRef.current.right.y
+              };
+
+              const features = [
+                zeroL.x / scales.irisScale, zeroL.y / scales.irisScale,
+                zeroR.x / scales.irisScale, zeroR.y / scales.irisScale,
+                head.yaw / scales.headYawScale, head.pitch / scales.headPitchScale,
+                aL / scales.apertureScale, aR / scales.apertureScale
+              ];
+
+              trainingDataRef.current.push({
+                x: features,
+                y: [delayedTarget.u, delayedTarget.v]
+              })
+            }
+          }
+        }
       }
     }
 
@@ -868,7 +858,7 @@ function App() {
           rightEyeFrame.eyeHeight > 0.15 * rightEyeFrame.eyeWidth;
 
         if (!eyeCalibRef.current.active &&
-            xyCalibRef.current.model &&
+            nnModelRef.current &&
             lastNormRef.current &&
             okAperture) {
           
@@ -879,32 +869,43 @@ function App() {
           const smL = emaLeftRef.current(lastNormRef.current.left);
           const smR = emaRightRef.current(lastNormRef.current.right);
           
-          const zL_raw = { x: smL.x - gazeOffsetRef.current.left.x, y: smL.y - gazeOffsetRef.current.left.y };
-          const zR_raw = { x: smR.x - gazeOffsetRef.current.right.x, y: smR.y - gazeOffsetRef.current.right.y };
-
-          const zL = zL_raw;
-          const zR = zR_raw;
+          const zL = { 
+            x: smL.x - gazeOffsetRef.current.left.x, 
+            y: smL.y - gazeOffsetRef.current.left.y 
+          };
+          const zR = { 
+            x: smR.x - gazeOffsetRef.current.right.x, 
+            y: smR.y - gazeOffsetRef.current.right.y 
+          };
 
           const apertures = getEyeApertures(lastNormRef.current.landmarks);
-          const apertureL_norm = apertures ? normalizeAperture(apertures.left, leftEyeFrame.eyeWidth) : null;
-          const apertureR_norm = apertures ? normalizeAperture(apertures.right, rightEyeFrame.eyeWidth) : null;
+          const aL = apertures ? normalizeAperture(apertures.left, leftEyeFrame.eyeWidth) : 0;
+          const aR = apertures ? normalizeAperture(apertures.right, rightEyeFrame.eyeWidth) : 0;
 
-          let { u, v } = evalScreenXYModel(zL, zR, headAnglesNow, xyCalibRef.current.model, apertureL_norm, apertureR_norm);
+          const scales = featureNormRef.current;
+          const features = [
+            zL.x / scales.irisScale, zL.y / scales.irisScale,
+            zR.x / scales.irisScale, zR.y / scales.irisScale,
+            headAnglesNow.yaw / scales.headYawScale,
+            headAnglesNow.pitch / scales.headPitchScale,
+            aL / scales.apertureScale,
+            aR / scales.apertureScale
+          ];
 
-          const u_raw = u;
-          const v_raw = v;
+          const [u_raw, v_raw] = tf.tidy(() => {
+            const input = tf.tensor2d([features]);
+            const output = nnModelRef.current.predict(input);
+            return output.dataSync();
+          });
 
-          const uvSm = emaPogRef.current({ x: u, y: v });
-          u = Math.max(0, Math.min(1, uvSm.x));
-          v = Math.max(0, Math.min(1, uvSm.y));
+          const uvSm = emaPogRef.current({ x: u_raw, y: v_raw });
+          let u = Math.max(0, Math.min(1, uvSm.x));
+          let v = Math.max(0, Math.min(1, uvSm.y));
 
           const xpix = u * ocv.width;
           const ypix = v * ocv.height;
 
           latestPogRef.current = { x: xpix, y: ypix };
-
-          const debugFeatsV = buildVerticalFeatures(zL, zR, headAnglesNow, xyCalibRef.current.model.order, apertureL_norm, apertureR_norm);
-          const debugFeatsU = buildHorizontalFeatures(zL, zR, headAnglesNow, xyCalibRef.current.model.order);
           
           setPogTraceInfo({
             input: {
@@ -924,12 +925,11 @@ function App() {
               right: { x: smR.x, y: smR.y }
             },
             features: {
-              vertical: debugFeatsV,
-              horizontal: debugFeatsU
+              nn: features
             },
             weights: {
-              wV: xyCalibRef.current.model.wV,
-              wU: xyCalibRef.current.model.wU
+              type: 'Neural Network',
+              layers: '8->64->32->2'
             },
             rawPrediction: { u: u_raw, v: v_raw },
             smoothed: { u: uvSm.x, v: uvSm.y },
@@ -1027,81 +1027,86 @@ function App() {
       const octx = ocv.getContext("2d");
       octx.clearRect(0, 0, ocv.width, ocv.height);
 
-      const ec = eyeCalibRef.current;
-      const radius = Math.max(10, Math.min(16, 0.012 * Math.min(ocv.width, ocv.height)));
-      const isFirstPose = currentPoseIndexRef.current === 0;
+      const currentStage = calibStageRef.current;
 
-      for (let i = 0; i < ec.normPoints.length; i++) {
-        const { u, v } = ec.normPoints[i];
-        const px = u * ocv.width;
-        const py = v * ocv.height;
-        const isCenterDot = i === 4;
-        const isClicked = poseClickedDotsRef.current.includes(i);
-
+      if (currentStage === 'pursuit' || currentStage === 'anchor') {
         octx.beginPath();
-        octx.arc(px, py, radius, 0, Math.PI * 2);
+        const pathPoints = 300;
+        const totalTime = 30;
 
-        if (isFirstPose && isCenterDot && !baselineSetRef.current) {
-          octx.fillStyle = "rgba(255, 215, 0, 0.95)";
-          octx.fill();
-          octx.lineWidth = 4;
-          octx.strokeStyle = "#FF0000";
-          octx.stroke();
+        for (let i = 0; i <= pathPoints; i++) {
+          const t = (i / pathPoints) * totalTime;
+          const coords = getLissajousCoords(t);
+          const pathX = coords.u * ocv.width;
+          const pathY = coords.v * ocv.height;
 
-          const pulseSize = radius + Math.sin(Date.now() / 200) * 3;
-          octx.beginPath();
-          octx.arc(px, py, pulseSize, 0, Math.PI * 2);
-          octx.strokeStyle = "rgba(255, 215, 0, 0.5)";
-          octx.lineWidth = 2;
-          octx.stroke();
-        } else {
-          octx.fillStyle = isClicked
-            ? "rgba(0, 255, 0, 0.95)"
-            : "rgba(255, 255, 255, 0.9)";
-          octx.fill();
-          octx.lineWidth = 2;
-          octx.strokeStyle = "#222";
-          octx.stroke();
+          if (i === 0) {
+            octx.moveTo(pathX, pathY);
+          } else {
+            octx.lineTo(pathX, pathY);
+          }
         }
+
+        octx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+        octx.lineWidth = 2;
+        octx.stroke();
+
+        // const markerTimes = [0, 5, 10, 15, 20];
+        // markerTimes.forEach(t => {
+        //   const coords = getLissajousCoords(t);
+        //   octx.beginPath();
+        //   octx.arc(coords.u * ocv.width, coords.v * ocv.height, 4, 0, Math.PI * 2);
+        //   octx.fillStyle = "rgba(255, 255, 255, 0.3)";
+        //   octx.fill();
+        // });
+      }
+      const px = calibDotRef.current.u * ocv.width;
+      const py = calibDotRef.current.v * ocv.height;
+
+      octx.beginPath()
+      octx.arc(px, py, 18, 0, Math.PI * 2);
+      octx.fillStyle = currentStage === 'anchor' ? "#FFD700" :
+                        currentStage === 'capturing-baseline' ? "#FFA500" : "#00FF00";
+      octx.fill();
+      octx.strokeStyle = "white";
+      octx.lineWidth = 3;
+      octx.stroke();
+
+      if (currentStage === 'anchor') {
+        const pulseSize = 18 + Math.sin(Date.now() / 200) * 4;
+        octx.beginPath();
+        octx.arc(px, py, pulseSize, 0, Math.PI * 2);
+        octx.strokeStyle = "rgba(255, 215, 0, 0.5)";
+        octx.lineWidth = 2;
+        octx.stroke();
       }
 
-      const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/45`;
-      octx.fillStyle = "rgba(0, 0, 0, 0.6)";
-      octx.fillRect(10, 320, 140, 26);
-      octx.fillStyle = "#fff";
-      octx.font = "14px Arial";
-      octx.fillText(`Eye calib: ${currentProgress}`, 24, 338);
+      if (currentStage === 'pursuit' && calibStartTimeRef.current) {
+        const elapsed = (Date.now() - calibStartTimeRef.current) / 1000;
+        const progress = Math.min(1, elapsed / 30);
 
-      const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
-      const poseInstructions = {
-        straight: baselineSetRef.current
-          ? "Head STRAIGHT - Click remaining dots"
-          : "Head STRAIGHT - Click CENTER dot FIRST!",
-        left: "Turn head LEFT ~20",
-        right: "Turn head right ~20",
-        up: "Tilt head up ~15",
-        down: "Tilt head down ~15",
-        "tilt-left": "Tilt head to LEFT shoulder",
-        "tilt-right": "Tilt head to RIGHT shoulder"
-      };
+        octx.fillStyle = "rgba(0, 0, 0, 0.6)";
+        octx.fillRect(ocv.width / 2 - 150, 130, 300, 20);
 
-      octx.save();
+        octx.fillStyle = "#4CAF50";
+        octx.fillRect(ocv.width / 2 - 150, 130, 300 * progress, 20);
+
+        octx.strokeStyle = "white";
+        octx.lineWidth = 2;
+        octx.strokeRect(ocv.width / 2 - 150, 130, 300, 20);
+
+        octx.fillStyle = "#ccc";
+        octx.font = "14px Arial";
+        octx.textAlign = "center";
+        octx.fillText(`Samples: ${trainingDataRef.current.length}`, ocv.width / 2, 170);
+      }
+
       octx.fillStyle = "rgba(0, 0, 0, 0.7)";
-      octx.fillRect(ocv.width / 2 - 200, 50, 400, 100);
-
-      octx.fillStyle = "#FFD700";
-      octx.font = "bold 24px Arial";
-      octx.textAlign = "center";
-      octx.fillText(
-        `Pose ${currentPoseIndexRef.current + 1}/5 - Click ${poseClickedDotsRef.current.length}/9 dots`,
-        ocv.width / 2,
-        90
-      );
-
+      octx.fillRect(ocv.width / 2 - 200, 50, 400, 50);
       octx.fillStyle = "white";
-      octx.font = "20px Arial";
-      octx.fillText(poseInstructions[poseName] || poseName, ocv.width / 2, 125);
-      octx.restore();
+      octx.font = "bold 18px Arial";
+      octx.textAlign = "center";
+      octx.fillText(calibInstruction, ocv.width / 2, 82);
     }
   };
 
@@ -1479,22 +1484,25 @@ function App() {
         </div>
 
         <div style={{ marginBottom: "10px", background: "rgba(255, 255, 255, 0.05)", padding: "8px", borderRadius: "4px" }}>
-          <div style={{ color: "#2196F3", fontWeight: "bold", marginBottom: "4px" }}>VERTICAL FEATURES</div>
+          <div style={{ color: "#2196F3", fontWeight: "bold", marginBottom: "4px" }}>NN INPUT FEATURES</div>
           <div style={{ fontSize: "10px", lineHeight: "1.4" }}>
-            {features.vertical.map((f, i) => (
-              <div key={i}>f[{i}] = {f.toFixed(4)}</div>
-            ))}
+            {/* Use the new 'nn' key and check for its existence before mapping */}
+            {features && features.nn ? (
+              features.nn.map((f, i) => (
+                <div key={i}>f[{i}] = {f.toFixed(4)}</div>
+              ))
+            ) : (
+              <div style={{ color: '#aaa' }}>Waiting for model inference...</div>
+            )}
           </div>
         </div>
 
-        <div style={{ marginBottom: "10px", background: "rgba(255,255,255,0.05)", padding: "8px", borderRadius: "4px" }}>
-          <div style={{ color: "#9C27B0", fontWeight: "bold", marginBottom: "4px" }}>⚖️ VERTICAL WEIGHTS (wV)</div>
+        <div style={{ marginBottom: "10px", background: "rgba(255, 255, 255, 0.05)", padding: "8px", borderRadius: "4px" }}>
+          <div style={{ color: "#9C27B0", fontWeight: "bold", marginBottom: "4px" }}>🧠 MODEL STATUS</div>
           <div style={{ fontSize: "10px", lineHeight: "1.4" }}>
-            {weights.wV?.map((w, i) => (
-              <div key={i} style={{ color: Math.abs(w) > 0.3 ? "#ffeb3b" : "#fff" }}>
-                w[{i}] = {w.toFixed(4)} {Math.abs(w) > 0.3 ? "★" : ""}
-              </div>
-            ))}
+            <div>Type: {weights.type}</div>
+            <div>Architecture: {weights.layers}</div>
+            <div style={{ color: "#00FF00", marginTop: "4px" }}>Active: ✅ Neural Network Bridge</div>
           </div>
         </div>
 

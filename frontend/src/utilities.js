@@ -1,4 +1,5 @@
 import { exp, math, mod, norm } from "@tensorflow/tfjs";
+import * as tf from "@tensorflow/tfjs"
 
 export const TRIANGULATION = [
     127,
@@ -3471,4 +3472,50 @@ export const TRIANGULATION = [
       u, v
     };
   }
+
+  // Calculate Lissajous (figure-8) coordinates
+  export const getLissajousCoords = (time) => {
+    const phase = time * 0.35;
+    const u = 0.5 + 0.42 * Math.sin(phase * 2.1) + 0.03 * Math.sin(phase * 7);
+    const v = 0.5 + 0.42 * Math.cos(phase * 1.5) + 0.03 * Math.cos(phase * 5);
+
+    return {
+      u: Math.max(0.05, Math.min(0.95, u)),
+      v: Math.max(0.05, Math.min(0.95, v))
+    };
+  };
+
+  export const isBlinking = (apertureL, apertureR, threshold = 0.14) => {
+    return apertureL < threshold || apertureR < threshold;
+  };
+
+  // Neural network to map 8 features to 2 screen coordinates (U, V)
+  export const createGazeModel = () => {
+    const model = tf.sequential();
+
+    // Layer 1: Input (8 features) -> Hidden (64 neurons)
+    model.add(tf.layers.dense({
+      units: 64,
+      activation: 'relu',
+      inputShape: [8]
+    }));
+
+    // Layer 2: Hidden (32 neurons)
+    model.add(tf.layers.dense({
+      units: 32,
+      activation: 'relu'
+    }));
+
+    model.add(tf.layers.dense({
+      units: 2,
+      activation: 'linear'
+    }));
+
+    model.compile({
+      optimizer: tf.train.adam(0.001),
+      loss: 'meanSquaredError'
+    });
+
+    return model;
+  };
 
