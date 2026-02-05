@@ -3472,3 +3472,18 @@ export const TRIANGULATION = [
     };
   }
 
+  export const getLissajousCoords = (time) => {
+    const phase = time * 0.35;
+    const u = 0.5 + 0.42 * Math.sin(phase * 2.1) + 0.03 * Math.sin(phase * 7);
+    const v = 0.5 + 0.42 * Math.cos(phase * 1.5) + 0.03 * Math.cos(phase * 5);
+
+    return {
+      u: Math.max(0.05, Math.min(0.95, u)),
+      v: Math.max(0.05, Math.min(0.95, v))
+    };
+  };
+
+  export const isBlinking = (apertureL, apertureR, threshold = 0.14) => {
+    return apertureL < threshold || apertureR < threshold;
+  };
+

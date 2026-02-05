@@ -1,4 +1,4 @@
-import React, {useRef, useState, useEffect} from 'react';
+import React, {useRef, useState, useEffect, useContext} from 'react';
 import * as tf from "@tensorflow/tfjs";
 import '@tensorflow/tfjs-backend-webgl';
 import * as faceLandmarksDetection from '@tensorflow-models/face-landmarks-detection'
@@ -23,7 +23,10 @@ import { drawMesh, displayPoseInfo,
          buildHorizontalFeatures,
          getEyeApertures,
          normalizeAperture,
+         getLissajousCoords,
+         isBlinking,
  } from './utilities';
+import { makeShaderKey } from '@tensorflow/tfjs-backend-webgl/dist/gpgpu_math';
 
 function App() {
   const webcamRef = useRef(null);
@@ -71,6 +74,11 @@ function App() {
   const testPointIndexRef = useRef(-1);
   const latestPogRef = useRef({ x: 0, y: 0 });
 
+  const calibStageRef = useRef('idle');
+  const calibStartTimeRef = useRef(null);
+  const targetQueueRef = useRef([]);
+  const calibDotRef = useRef({ u: 0.5, v: 0.5 });
+
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationPose, setCalibrationPose] = useState(null);
   const [calibVersion, setCalibVersions] = useState(0);
@@ -103,6 +111,14 @@ function App() {
   const [testPointIndex, setTestPointIndex] = useState(-1);
   const testResultsRef = useRef([]);
   const [testSummary, setTestSummary] = useState(null);
+
+  const [calibStage, setCalibStage] = useState('idle');
+  const [calibDot, setCalibDot] = useState({ u: 0.5, v: 0.5 });
+  const [calibInstruction, setCalibInstruction] = useState("");
+
+  useEffect(() => {
+    calibStageRef.current = calibStage;
+  }, [calibStage]);
 
   useEffect(() => {
     isTestingRef.current = isTesting;
@@ -198,16 +214,19 @@ function App() {
     };
 
     eyeCalibRef.current.active = true;
-    eyeCalibRef.current.normPoints = buildGrid();
-    eyeCalibRef.current.clicked = [];
     currentPoseIndexRef.current = 0;
-    poseClickedDotsRef.current = [];
 
     // screenCalibRef.current.samples = [];
     // screenCalibRef.current.solved = null;
 
     xyCalibRef.current.samples = [];
     xyCalibRef.current.model = null;
+    targetQueueRef.current = [];
+
+    setCalibStage('anchor');
+    calibDotRef.current = { u: 0.5, v: 0.5 };
+    setCalibDot({ u: 0.5, v: 0.5 });
+    setCalibInstruction("Look at the CENTER dot and CLICK when ready");
 
     if (!detectorRef.current && webcamRef.current?.video.readyState === 4) {
       try {
@@ -233,6 +252,68 @@ function App() {
     }
 
     console.log("Calibration started - Click CENTER dot first!");
+    setCalibVersions(v => v + 1);
+  };
+
+  const startPursuitPhase = () => {
+    const poseIndex = currentPoseIndexRef.current;
+    const poseName = headPoseNamesRef.current[poseIndex];
+
+    console.log(`Starting pursuit phase for pose ${poseIndex + 1}/5: ${poseName}`);
+
+    setCalibStage('pursuit');
+    calibStartTimeRef.current = Date.now();
+    targetQueueRef.current = [];
+
+    const instructions = {
+      straight: "Phase 1: Keep head STRAIGHT and follow the dot",
+      left: "Phase 2: Turn head LEFT ~20 and follow the dot",
+      right: "Phase 3: Turn head RIGHT ~20 and follow the dot",
+      up: "Phase 4: Tilt head UP ~15 and follow the dot",
+      down: "Phase 5: Tilt head DOWN ~15 and follow the dot"
+    };
+
+    setCalibInstruction(instructions[poseName] || `Follow the dot - ${poseName}`);
+  }
+
+  const finishPursuitPhase = () => {
+    const poseIndex = currentPoseIndexRef.current;
+    const poseName = headPoseNamesRef.current[poseIndex];
+
+    console.log(`Complete pose ${poseIndex + 1}/5: ${poseName}, collected ${xyCalibRef.current.samples.length} total samples`);
+
+    currentPoseIndexRef.current++;
+
+    if (currentPoseIndexRef.current >= headPoseNamesRef.current.length) {
+      console.log(`All ${xyCalibRef.current.samples.length} samples collected!`);
+
+      const ridge = eyeCalibRef.current.order === 3 ? 0.5 :
+                    eyeCalibRef.current.order === 2 ? 0.5 : 1e-3;
+      xyCalibRef.current.model = fitScreenXYModel(
+        xyCalibRef.current.samples,
+        eyeCalibRef.current.order,
+        ridge,
+        true
+      );
+
+      fitCalib('left', eyeCalibRef.current.order);
+      fitCalib('right', eyeCalibRef.current.order);
+
+      stopEyeCalibration();
+    } else {
+      const nextPoseName = headPoseNamesRef.current[currentPoseIndexRef.current];
+      setCalibStage('pose-instruction');
+
+      const instructions = {
+        left: "Get ready: Turn head LEFT ~20\nClick anywhere when positioned",
+        right: "Get ready: Turn head RIGHT ~20\nClick anywhere when positioned",
+        up: "Get ready: Tilt head UP ~15\nClick anywhere when positioned",
+        down: "Get ready: Tilt head DOWN ~15\nClick anywhere when positioned"
+      };
+
+      setCalibInstruction(instructions[nextPoseName] || `Get ready for ${nextPoseName} pose`);
+    }
+
     setCalibVersions(v => v + 1);
   };
 
@@ -366,45 +447,17 @@ function App() {
     window.addEventListener("resize", setSize);
 
     const handleClick = (e) => {
-      const ec = eyeCalibRef.current;
-      if (!ec.active || !lastNormRef.current) return;
+      if (!eyeCalibRef.current.active || !lastNormRef.current) return;
 
-      const rect = ocv.getBoundingClientRect()
-      const x = (e.clientX - rect.left) * (ocv.width / rect.width);
-      const y = (e.clientY - rect.top) * (ocv.height / rect.height);
+      const currentStage = calibStageRef.current;
 
-      const radius = Math.max(18, Math.min(28, 0.02 * Math.min(ocv.width, ocv.height)));
-      let hitIdx = -1;
-      let minD2 = Infinity;
-
-      for (let i = 0; i < ec.normPoints.length; i++) {
-        if (poseClickedDotsRef.current.includes(i)) continue;
-        const px = ec.normPoints[i].u * ocv.width;
-        const py = ec.normPoints[i].v * ocv.height;
-        const d2 = (x - px) * (x - px) + (y - py) * (y - py);
-        if (d2 < radius * radius && d2 < minD2) {
-          minD2 = d2;
-          hitIdx = i;
-        }
-      }
-
-      if (hitIdx === -1) return;
-
-      const isFirstPose = currentPoseIndexRef.current == 0;
-      const isCenterDot = hitIdx === 4;
-
-      if (isFirstPose && !baselineSetRef.current) {
-        if (!isCenterDot) {
-          alert("Please click the CENTER dot first to set your baseline!");
+      if (currentStage === 'anchor') {
+        if (!lastNormRef.current.landmarks) {
+          alert("No face detected! Please ensure your face is visible.");
           return;
         }
 
         try {
-          if (!lastNormRef.current.landmarks) {
-            alert("No face data available! PLease ensure your face is visible.");
-            return;
-          }
-
           const landmarks = lastNormRef.current.landmarks;
 
           headTemplateRef.current = pickPoint3D(landmarks);
@@ -428,12 +481,7 @@ function App() {
               const vy = tip[1] - br[1];
               const vz = tip[2] - br[2];
               const n = Math.hypot(vx, vy, vz) || 1;
-              
-              return [
-                vx / n,
-                vy / n,
-                vz / n
-              ];
+              return [vx / n, vy / n, vz / n];
             })();
 
             const pdUnits = Math.hypot(
@@ -510,7 +558,6 @@ function App() {
               up: [E.up[0], E.up[1]],
               down: [E.down[0], E.down[1]],
             };
-
             return buildEyeLocalFrame(eye2D);
           };
 
@@ -528,25 +575,20 @@ function App() {
           );
 
           if (!norm0) {
-            alert("Iris not detected! Please ensure your eyes are visible and look at the camera.");
+            alert("iris not detected! Please ensure your eyes are visible.");
             return;
           }
 
-          if (norm0) {
-            gazeOffsetRef.current = {
-              left: { ...norm0.left },
-              right: { ...norm0.right },
-            };
-            baselineSetRef.current = true;
-            setIsCalibrated(true);
-            console.log("Iris baseline saved:", gazeOffsetRef.current);
-            console.log("ALL BASELINE DATA SAVED - Continue calibration!");
+          gazeOffsetRef.current = {
+            left: { ...norm0.left },
+            right: { ...norm0.right },
+          };
+          baselineSetRef.current = true;
+          setIsCalibrated(true);
+          console.log("Iris baseline saved:", gazeOffsetRef.current);
+          console.log("All baseline data saved - Starting pursuit calibration!");
 
-            return;
-          } else {
-            alert("Failed to compute iris baseline!");
-            return;
-          }
+          startPursuitPhase();
         } catch (e) {
           console.error("Baseline setup failed:", e);
           alert("Setup failed! Please try again.");
@@ -554,85 +596,8 @@ function App() {
         }
       }
 
-      const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
-      const headAnglesNow = (RtRef.current?.R_now)
-        ? eulerFromR(RtRef.current.R_now)
-        : { yaw: 0, pitch: 0 };
-
-      const smL = emaLeftRef.current(lastNormRef.current.left);
-      const smR = emaRightRef.current(lastNormRef.current.right);
-
-      const zeroL = {
-        x: smL.x - gazeOffsetRef.current.left.x,
-        y: smL.y - gazeOffsetRef.current.left.y
-      };
-      const zeroR = {
-        x: smR.x - gazeOffsetRef.current.right.x,
-        y: smR.y - gazeOffsetRef.current.right.y
-      }
-
-      const zL = zeroL;
-      const zR = zeroR;
-
-      const apertures = getEyeApertures(lastNormRef.current.landmarks);
-      const leftFrame = getEyeLocalFrames(lastNormRef.current.landmarks).left;
-      const rightFrame = getEyeLocalFrames(lastNormRef.current.landmarks).right;
-
-      const apertureL_norm = apertures ? normalizeAperture(apertures.left, leftFrame.eyeWidth) : null;
-      const apertureR_norm = apertures ? normalizeAperture(apertures.right, rightFrame.eyeWidth) : null;
-
-      const u = x / ocv.width;
-      const v = y / ocv.height;
-
-      xyCalibRef.current.samples.push({
-        u, v, 
-        zL, zR,
-        head: headAnglesNow,
-        apertureL: apertureL_norm,
-        apertureR: apertureR_norm
-      });
-
-      if (xyCalibRef.current.samples.length >= 6) {
-        const ridge = eyeCalibRef.current.order === 3 ? 0.5 :
-                      eyeCalibRef.current.order === 2 ? 0.5 : 1e-3;
-        xyCalibRef.current.model = fitScreenXYModel(
-          xyCalibRef.current.samples, 
-          eyeCalibRef.current.order,
-          ridge, 
-          true
-        );
-      } 
-
-      const { yaw, pitch } = labelForIndex(hitIdx);
-      addCalibSample('left', zeroL.x, zeroL.y, yaw, pitch);
-      addCalibSample('right', zeroR.x, zeroR.y, yaw, pitch);
-
-      poseClickedDotsRef.current.push(hitIdx);
-      ec.clicked[hitIdx] = (ec.clicked[hitIdx] || 0) + 1;
-
-      const headAngles = eulerFromR(RtRef.current.R_now);
-      console.log(`Pose ${currentPoseIndexRef.current + 1}/5 (${poseName}), Dot ${hitIdx}, Progress: ${poseClickedDotsRef.current.length}/9, Head: y=${headAngles.yaw.toFixed(1)} p=${headAngles.pitch.toFixed(1)}`);
-
-      setCalibVersions(v => v + 1);
-
-      if (poseClickedDotsRef.current.length === 9) {
-        console.log(`Completed pose ${currentPoseIndexRef.current + 1}/7 (${poseName})`);
-
-        currentPoseIndexRef.current++;
-        poseClickedDotsRef.current = [];
-
-        setCalibVersions(v => v + 1);
-      }
-
-      const allDone = currentPoseIndexRef.current >= headPoseNamesRef.current.length;
-
-      if (allDone) {
-        console.log(`All ${xyCalibRef.current.samples.length} samples collected (${headPoseNamesRef.current.length} pose x 9 dots)`);
-        fitCalib('left', ec.order);
-        fitCalib('right', ec.order);
-
-        setCalibVersions(v => v + 1);
-        stopEyeCalibration();
+      else if (currentStage === 'pose-instruction') {
+        startPursuitPhase();
       }
     };
 
@@ -712,6 +677,63 @@ function App() {
       if (norm) {
         lastNormRef.current.left = { ...norm.left };
         lastNormRef.current.right = { ...norm.right};
+      }
+    }
+
+    if (eyeCalibRef.current.active && norm && calibStageRef.current === 'pursuit') {
+      const elapsed = (Date.now() - calibStartTimeRef.current) / 1000;
+      const PURSUIT_DURATION = 30;
+
+      if (elapsed >= PURSUIT_DURATION) {
+        finishPursuitPhase();
+      } else {
+        const currentTarget = getLissajousCoords(elapsed);
+        calibDotRef.current = currentTarget;
+        setCalibDot(currentTarget);
+
+        const apertures = getEyeApertures(landmarks);
+        const leftFrame = getEyeLocalFrames(landmarks).left;
+        const rightFrame = getEyeLocalFrames(landmarks).right;
+        const aL = normalizeAperture(apertures?.left, leftFrame.eyeWidth);
+        const aR = normalizeAperture(apertures?.right, rightFrame.eyeWidth);
+
+        if (!isBlinking(aL, aR)) {
+          targetQueueRef.current.push(currentTarget);
+
+          if (targetQueueRef.current.length > 2) {
+            const delayedTarget = targetQueueRef.current.shift();
+            const headAnglesNow = eulerFromR(RtRef.current.R_now);
+            const smL = emaLeftRef.current(norm.left);
+            const smR = emaRightRef.current(norm.right);
+
+            const zeroL = {
+              x: smL.x - gazeOffsetRef.current.left.x,
+              y: smL.y - gazeOffsetRef.current.left.y
+            };
+            const zeroR = {
+              x: smR.x - gazeOffsetRef.current.right.x,
+              y: smR.y - gazeOffsetRef.current.right.y
+            };
+
+            xyCalibRef.current.samples.push({
+              u: delayedTarget.u,
+              v: delayedTarget.v,
+              zL: zeroL,
+              zR: zeroR,
+              head: headAnglesNow,
+              apertureL: aL,
+              apertureR: aR
+            });
+
+            const uDev = delayedTarget.u - 0.5;
+            const vDev = delayedTarget.v - 0.5;
+            const yawLabel = uDev * 20;
+            const pitchLabel = -vDev * 20;
+
+            addCalibSample('left', zeroL.x, zeroL.y, yawLabel, pitchLabel);
+            addCalibSample('right', zeroR.x, zeroR.y, yawLabel, pitchLabel);
+          }
+        }
       }
     }
 
@@ -1027,82 +1049,98 @@ function App() {
       const octx = ocv.getContext("2d");
       octx.clearRect(0, 0, ocv.width, ocv.height);
 
-      const ec = eyeCalibRef.current;
-      const radius = Math.max(10, Math.min(16, 0.012 * Math.min(ocv.width, ocv.height)));
-      const isFirstPose = currentPoseIndexRef.current === 0;
+      const currentStage = calibStageRef.current;
 
-      for (let i = 0; i < ec.normPoints.length; i++) {
-        const { u, v } = ec.normPoints[i];
-        const px = u * ocv.width;
-        const py = v * ocv.height;
-        const isCenterDot = i === 4;
-        const isClicked = poseClickedDotsRef.current.includes(i);
-
+      // Draw Lissajous path during pursuit
+      if (currentStage === 'pursuit') {
         octx.beginPath();
-        octx.arc(px, py, radius, 0, Math.PI * 2);
+        const pathPoints = 300;
+        const PURSUIT_DURATION = 30;
 
-        if (isFirstPose && isCenterDot && !baselineSetRef.current) {
-          octx.fillStyle = "rgba(255, 215, 0, 0.95)";
-          octx.fill();
-          octx.lineWidth = 4;
-          octx.strokeStyle = "#FF0000";
-          octx.stroke();
+        for (let i = 0; i <= pathPoints; i++) {
+          const t = (i / pathPoints) * PURSUIT_DURATION;
+          const coords = getLissajousCoords(t);
+          const pathX = coords.u * ocv.width;
+          const pathY = coords.v * ocv.height;
 
-          const pulseSize = radius + Math.sin(Date.now() / 200) * 3;
-          octx.beginPath();
-          octx.arc(px, py, pulseSize, 0, Math.PI * 2);
-          octx.strokeStyle = "rgba(255, 215, 0, 0.5)";
+          if (i === 0) {
+            octx.moveTo(pathX, pathY);
+          } else {
+            octx.lineTo(pathX, pathY);
+          }
+        }
+
+        octx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+        octx.lineWidth = 2;
+        octx.stroke();
+
+        // Draw progress bar
+        if (calibStartTimeRef.current) {
+          const elapsed = (Date.now() - calibStartTimeRef.current) / 1000;
+          const progress = Math.min(1, elapsed / PURSUIT_DURATION);
+
+          octx.fillStyle = "rgba(0, 0, 0, 0.6)";
+          octx.fillRect(ocv.width / 2 - 150, 130, 300, 20);
+
+          octx.fillStyle = "#4CAF50";
+          octx.fillRect(ocv.width / 2 - 150, 130, 300 * progress, 20);
+
+          octx.strokeStyle = "white";
           octx.lineWidth = 2;
-          octx.stroke();
-        } else {
-          octx.fillStyle = isClicked
-            ? "rgba(0, 255, 0, 0.95)"
-            : "rgba(255, 255, 255, 0.9)";
-          octx.fill();
-          octx.lineWidth = 2;
-          octx.strokeStyle = "#222";
-          octx.stroke();
+          octx.strokeRect(ocv.width / 2 - 150, 130, 300, 20);
+
+          octx.fillStyle = "#ccc";
+          octx.font = "14px Arial";
+          octx.textAlign = "center";
+          octx.fillText(`Samples: ${xyCalibRef.current.samples.length}`, ocv.width / 2, 170);
         }
       }
 
-      const currentProgress = `${currentPoseIndexRef.current * 9 + poseClickedDotsRef.current.length}/45`;
-      octx.fillStyle = "rgba(0, 0, 0, 0.6)";
-      octx.fillRect(10, 320, 140, 26);
-      octx.fillStyle = "#fff";
-      octx.font = "14px Arial";
-      octx.fillText(`Eye calib: ${currentProgress}`, 24, 338);
+      // Draw the calibration dot 
+      const px = calibDotRef.current.u * ocv.width;
+      const py = calibDotRef.current.v * ocv.height;
 
-      const poseName = headPoseNamesRef.current[currentPoseIndexRef.current];
-      const poseInstructions = {
-        straight: baselineSetRef.current
-          ? "Head STRAIGHT - Click remaining dots"
-          : "Head STRAIGHT - Click CENTER dot FIRST!",
-        left: "Turn head LEFT ~20",
-        right: "Turn head right ~20",
-        up: "Tilt head up ~15",
-        down: "Tilt head down ~15",
-        "tilt-left": "Tilt head to LEFT shoulder",
-        "tilt-right": "Tilt head to RIGHT shoulder"
+      octx.beginPath();
+      octx.arc(px, py, 18, 0, Math.PI * 2);
+      octx.fillStyle = currentStage === 'anchor' ? "#FFD700" :
+                        currentStage === 'pose-instruction' ? "#FF9800" : "#00FF00";
+      octx.fill();
+      octx.strokeStyle = "white";
+      octx.lineWidth = 3;
+      octx.stroke();
+
+      // Pulse effect for anchor
+      if (currentStage === 'anchor') {
+        const pulseSize = 18 + Math.sin(Date.now() / 200) * 4;
+        octx.beginPath();
+        octx.arc(px, py, pulseSize, 0, Math.PI * 2);
+        octx.strokeStyle = "rgba(255, 215, 0, 0.5)";
+        octx.lineWidth = 2;
+        octx.stroke();
+      }
+
+      // Draw instruction text 
+      const poseIdx = currentPoseIndexRef.current;
+      const pName = headPoseNamesRef.current[poseIdx];
+      const phaseLabels = {
+        straight: "Phase 1/5: STRAIGHT",
+        left: "Phase 2/5: LEFT ~20",
+        right: "Phase 3/5: RIGHT ~20",
+        up: "Phase 4/5: UP ~15",
+        down: "Phase 5/5: DOWN ~15"
       };
 
-      octx.save();
+      const displayText = currentStage === 'pursuit'
+        ? phaseLabels[pName] || `Phase ${poseIdx + 1}/5`
+        : calibInstruction;
+
       octx.fillStyle = "rgba(0, 0, 0, 0.7)";
-      octx.fillRect(ocv.width / 2 - 200, 50, 400, 100);
-
-      octx.fillStyle = "#FFD700";
-      octx.font = "bold 24px Arial";
-      octx.textAlign = "center";
-      octx.fillText(
-        `Pose ${currentPoseIndexRef.current + 1}/5 - Click ${poseClickedDotsRef.current.length}/9 dots`,
-        ocv.width / 2,
-        90
-      );
-
+      octx.fillRect(ocv.width / 2 - 250, 50, 500, 60);
       octx.fillStyle = "white";
-      octx.font = "20px Arial";
-      octx.fillText(poseInstructions[poseName] || poseName, ocv.width / 2, 125);
-      octx.restore();
-    }
+      octx.font = "bold 18px Arial";
+      octx.textAlign = "center";
+      octx.fillText(displayText, ocv.width / 2, 90);
+    } 
   };
 
   const showAccuracyStats = () => {
@@ -1552,7 +1590,7 @@ function App() {
               width: "100%",
               height: "100%",
               objectFit: "cover",
-              transform: "scale(2.0)",
+              transform: "scale(1.3)",
               transformOrigin: "center",
             }}
           />
@@ -1634,7 +1672,7 @@ function App() {
             cursor: eyeCalibRef.current.active ? "default" : "pointer"
           }}
         >
-          {eyeCalibRef.current.active ? "Calibrating... Click center dot first!" : "Start Calibration (45 samples)"}
+          {eyeCalibRef.current.active ? "Calibrating... Follow the dot!" : "Start Calibration (Auto-Pursuit )"}
         </button>
 
         <div
