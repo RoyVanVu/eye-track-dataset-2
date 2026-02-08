@@ -1589,7 +1589,6 @@ function App() {
               width: "100%",
               height: "100%",
               objectFit: "cover",
-              transform: "scale(1.7)",
               transformOrigin: "center",
             }}
           />
