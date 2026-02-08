@@ -3473,9 +3473,17 @@ export const TRIANGULATION = [
   }
 
   export const getLissajousCoords = (time) => {
-    const phase = time * 0.35;
-    const u = 0.5 + 0.42 * Math.sin(phase * 2.1) + 0.03 * Math.sin(phase * 7);
-    const v = 0.5 + 0.42 * Math.cos(phase * 1.5) + 0.03 * Math.cos(phase * 5);
+    const A = 0.42;
+    const B = 0.42;
+    const a = 3;
+    const b = 2;
+    const delta = Math.PI / 2;
+    const speed = 0.35;
+
+    const t = time * speed;
+
+    const u = 0.5 + A * Math.sin(a * t + delta);
+    const v = 0.5 + B * Math.sin(b * t);
 
     return {
       u: Math.max(0.05, Math.min(0.95, u)),

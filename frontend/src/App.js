@@ -162,7 +162,6 @@ function App() {
     calibRef.current[eye].samples.push({
       dx, dy, yaw: yawLabelDeg, pitch: pitchLabelDeg
     });
-    // console.log(`Add sample ${eye}:`, dx, dy, '->', yawLabelDeg, pitchLabelDeg);
   };
 
   const fitCalib = (eye, order=1) => {
@@ -650,7 +649,7 @@ function App() {
     const faces = await net.estimateFaces(video);
     const ctx = canvasRef.current.getContext("2d");
     ctx.clearRect(0, 0, videoWidth, videoHeight); 
-    // drawMesh(faces, ctx);
+    drawMesh(faces, ctx);
 
     if (!faces.length) return;
 
@@ -682,7 +681,7 @@ function App() {
 
     if (eyeCalibRef.current.active && norm && calibStageRef.current === 'pursuit') {
       const elapsed = (Date.now() - calibStartTimeRef.current) / 1000;
-      const PURSUIT_DURATION = 30;
+      const PURSUIT_DURATION = 31;
 
       if (elapsed >= PURSUIT_DURATION) {
         finishPursuitPhase();
@@ -1024,7 +1023,7 @@ function App() {
             const liveDist = Math.sqrt(dx * dx + dy * dy);
 
             octx.fillStyle = "rgba(0, 0, 0, 0.7)";
-            octx.fillRect(targetX + 20, targetY - 20, 120, 30);
+            octx.fillRect(targetX + 20, targetY - 20, 120, 31);
             octx.fillStyle = "#00FF00";
             octx.font = "bold 14px Arial";
             octx.fillText(`Error: ${liveDist.toFixed(0)} px`, targetX + 25, targetY);       
@@ -1054,8 +1053,8 @@ function App() {
       // Draw Lissajous path during pursuit
       if (currentStage === 'pursuit') {
         octx.beginPath();
-        const pathPoints = 300;
-        const PURSUIT_DURATION = 30;
+        const pathPoints = 310;
+        const PURSUIT_DURATION = 31;
 
         for (let i = 0; i <= pathPoints; i++) {
           const t = (i / pathPoints) * PURSUIT_DURATION;
@@ -1590,7 +1589,7 @@ function App() {
               width: "100%",
               height: "100%",
               objectFit: "cover",
-              transform: "scale(1.3)",
+              transform: "scale(1.7)",
               transformOrigin: "center",
             }}
           />
