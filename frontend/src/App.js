@@ -993,13 +993,16 @@ function App() {
             );
           }
 
-          octx.beginPath();
-          octx.arc(xpix, ypix, 8, 0, Math.PI * 2);
-          octx.fillStyle = "rgba(255, 80, 80, 0.9)";
-          octx.fill();
-          octx.lineWidth = 3;
-          octx.strokeStyle = "white";
-          octx.stroke();
+          if (!isTestingRef.current)
+          {
+            octx.beginPath();
+            octx.arc(xpix, ypix, 8, 0, Math.PI * 2);
+            octx.fillStyle = "rgba(255, 80, 80, 0.9)";
+            octx.fill();
+            octx.lineWidth = 3;
+            octx.strokeStyle = "white";
+            octx.stroke();
+          }
 
           if (isTestingRef.current && testPointIndexRef.current !== -1) {
             const points = buildGrid();
@@ -1009,14 +1012,14 @@ function App() {
             const targetX = targetU * ocv.width;
             const targetY = targetV * ocv.height;
 
-            octx.beginPath();
-            octx.moveTo(targetX, targetY);
-            octx.lineTo(xpix, ypix);
-            octx.strokeStyle = "rgba(0, 255, 0, 0.6)";
-            octx.lineWidth = 2;
-            octx.setLineDash([5, 5]);
-            octx.stroke();
-            octx.setLineDash([]);
+            // octx.beginPath();
+            // octx.moveTo(targetX, targetY);
+            // octx.lineTo(xpix, ypix);
+            // octx.strokeStyle = "rgba(0, 255, 0, 0.6)";
+            // octx.lineWidth = 2;
+            // octx.setLineDash([5, 5]);
+            // octx.stroke();
+            // octx.setLineDash([]);
 
             const dx = targetX - xpix;
             const dy = targetY - ypix;

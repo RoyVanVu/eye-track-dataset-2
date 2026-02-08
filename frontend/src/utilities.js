@@ -3319,10 +3319,12 @@ export const TRIANGULATION = [
   }
 
   export function buildHorizontalFeatures(zL, zR, headAngles=null, order=2, useHead=false) {
+    const normalize = (val, scale=1) => val / scale;
+
     const base = [
-      zL.x,
-      zR.x,
-      (headAngles?.yaw || 0) / 30
+      normalize(zL.x, 0.5),
+      normalize(zR.x, 0.5),
+      normalize(headAngles?.yaw || 0, 30)
     ];
 
     const feats = [...base, 1];
